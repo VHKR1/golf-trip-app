@@ -311,8 +311,7 @@ function render() {
   app.innerHTML = h`
     <header class="topbar">
       <div class="brand">
-        <h1>Golf Trip Scramble</h1>
-        <span class="pill">Offline</span>
+        <h1>Golf Trip App</h1>
       </div>
     </header>
     <main class="main">${renderView()}</main>
@@ -465,14 +464,16 @@ function renderScorecard(round, course, team) {
 
 function renderLeaderboard() {
   const leaderboard = calculateLeaderboard(state);
-  const leader = leaderboard[0];
+  const leaders = leaderboard.filter((row) => row.rank === 1);
+  const leaderPoints = leaders[0]?.points ?? 0;
+  const leaderNames = leaders.map((row) => row.name).join(" / ");
   const completedCount = state.rounds.filter((round) => round.status === STATES.COMPLETE).length;
   return h`
     <section class="leader-hero">
       <h2 class="screen-title">🏆 Golf Trip Leaderboard</h2>
-      <p class="muted">${completedCount} completed round${completedCount === 1 ? "" : "s"} · current leader</p>
-      <div class="points">${leader?.points ?? 0}</div>
-      <strong>${leader?.name || "No players yet"}</strong>
+      <p class="muted">${completedCount} completed round${completedCount === 1 ? "" : "s"} · ${leaders.length > 1 ? "current leaders" : "current leader"}</p>
+      <div class="points">${leaderPoints}</div>
+      <strong>${leaderNames || "No players yet"}</strong>
     </section>
     <section class="card" id="leaderboard-card">
       <table class="leaderboard">
@@ -834,7 +835,8 @@ function exportLeaderboardImage() {
   ctx.textAlign = "center";
   ctx.fillText("🏆 Golf Trip Leaderboard", width / 2, 82);
   ctx.font = "600 30px system-ui";
-  ctx.fillText(`${leaderboard[0]?.name || "No leader"} · ${leaderboard[0]?.points || 0} pts`, width / 2, 132);
+  const leaders = leaderboard.filter((row) => row.rank === 1);
+  ctx.fillText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width / 2, 132);
   ctx.textAlign = "left";
   ctx.font = "700 28px system-ui";
   leaderboard.forEach((row, index) => {
