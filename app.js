@@ -12,6 +12,11 @@ const DEFAULT_POINTS = {
   longestDrive: 1,
   nearestPin: 1,
 };
+const GAME_MODES = {
+  SCRAMBLE: { label: "Scramble", scoring: "team", totalLabel: "Strokes", higherWins: false },
+  STROKE_PLAY: { label: "Stroke play", scoring: "player", totalLabel: "Strokes", higherWins: false },
+  STABLEFORD: { label: "Stableford", scoring: "player", totalLabel: "Points", higherWins: true },
+};
 
 const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
 const todayIso = () => new Date().toISOString();
@@ -76,6 +81,7 @@ function normalizeData(data) {
   clean.rounds = clean.rounds.map((round) => ({
     id: round.id || uid("round"),
     name: round.name || "Round",
+    gameMode: GAME_MODES[round.gameMode] ? round.gameMode : "SCRAMBLE",
     courseId: round.courseId || clean.courses[0].id,
     teams: Array.isArray(round.teams) ? round.teams : [],
     scoresByHole: round.scoresByHole || {},
@@ -126,7 +132,16 @@ function playerName(playerId) {
   return state.players.find((player) => player.id === playerId)?.name || "Unknown";
 }
 
-function teamLabel(team) {
+function gameModeFor(round) {
+  return GAME_MODES[round?.gameMode] || GAME_MODES.SCRAMBLE;
+}
+
+function isIndividualMode(round) {
+  return gameModeFor(round).scoring === "player";
+}
+
+function teamLabel(team, round = null) {
+  if (round && isIndividualMode(round)) return playerName(team.playerIds[0]) || "Empty player";
   return team.playerIds.map(playerName).join(" / ") || "Empty team";
 }
 
@@ -174,6 +189,10 @@ function playableTeams(round) {
   return round.teams.filter((team) => team.playerIds.length > 0);
 }
 
+function scoringEntityName(round) {
+  return isIndividualMode(round) ? "players" : "teams";
+}
+
 function roundPlayerIds(round) {
   return new Set(round.teams.flatMap((team) => team.playerIds));
 }
@@ -185,8 +204,9 @@ function cleanRoundAwards(round) {
 }
 
 function isRoundComplete(round, course) {
-  const hasEnoughTeams = playableTeams(round).length >= 2;
-  const allScored = hasEnoughTeams && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
+  const scoringGroups = playableTeams(round);
+  const hasEnoughGroups = scoringGroups.length >= 2;
+  const allScored = hasEnoughGroups && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
   return Boolean(allScored && round.awards.longestDrivePlayerId && round.awards.nearestPinPlayerId);
 }
 
@@ -201,11 +221,41 @@ export function calculateTeamTotal(round, teamId) {
   return Object.values(scores).reduce((sum, value) => sum + (Number(value) || 0), 0);
 }
 
-export function calculateRoundWinner(round) {
+function stablefordHolePoints(score, par) {
+  if (!Number.isFinite(score) || !Number.isFinite(par)) return 0;
+  const diff = score - par;
+  if (diff <= -3) return 5;
+  if (diff === -2) return 4;
+  if (diff === -1) return 3;
+  if (diff === 0) return 2;
+  if (diff === 1) return 1;
+  return 0;
+}
+
+function calculateStablefordTotal(round, teamId, course = courseFor(round)) {
+  const scores = round.scoresByHole?.[teamId] || {};
+  return course.holes.reduce((sum, hole) => sum + stablefordHolePoints(Number(scores[hole.holeNumber]), hole.par), 0);
+}
+
+function calculateScoringTotal(round, teamId, course = courseFor(round)) {
+  return round.gameMode === "STABLEFORD" ? calculateStablefordTotal(round, teamId, course) : calculateTeamTotal(round, teamId);
+}
+
+function teamHasScores(round, teamId) {
+  return Object.keys(round.scoresByHole?.[teamId] || {}).length > 0;
+}
+
+function displayScoringTotal(round, teamId, course = courseFor(round)) {
+  return teamHasScores(round, teamId) ? calculateScoringTotal(round, teamId, course) : "—";
+}
+
+export function calculateRoundWinner(round, course = courseFor(round)) {
   if (round.status !== STATES.COMPLETE) return [];
-  const totals = round.teams.map((team) => ({ teamId: team.id, total: calculateTeamTotal(round, team.id) }));
-  const low = Math.min(...totals.map((entry) => entry.total));
-  return totals.filter((entry) => entry.total === low).map((entry) => entry.teamId);
+  const mode = gameModeFor(round);
+  const totals = playableTeams(round).map((team) => ({ teamId: team.id, total: calculateScoringTotal(round, team.id, course) }));
+  if (!totals.length) return [];
+  const target = mode.higherWins ? Math.max(...totals.map((entry) => entry.total)) : Math.min(...totals.map((entry) => entry.total));
+  return totals.filter((entry) => entry.total === target).map((entry) => entry.teamId);
 }
 
 export function calculateClutchWinner(round) {
@@ -219,11 +269,11 @@ export function calculateClutchWinner(round) {
   return winners.length === 1 ? winners[0].teamId : "";
 }
 
-export function calculatePlayerPoints(round, playerId, points = DEFAULT_POINTS) {
-  return calculatePlayerPointBreakdown(round, playerId, points).total;
+export function calculatePlayerPoints(round, playerId, points = DEFAULT_POINTS, course = courseFor(round)) {
+  return calculatePlayerPointBreakdown(round, playerId, points, course).total;
 }
 
-function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS) {
+function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS, course = courseFor(round)) {
   const empty = {
     total: 0,
     resultPoints: 0,
@@ -235,8 +285,8 @@ function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS)
   if (round.status !== STATES.COMPLETE) return empty;
   const playerTeam = round.teams.find((team) => team.playerIds.includes(playerId));
   if (!playerTeam) return empty;
-  const winners = calculateRoundWinner(round);
-  const teamCount = round.teams.length;
+  const winners = calculateRoundWinner(round, course);
+  const teamCount = playableTeams(round).length;
   const tiedWin = winners.length > 1 && winners.includes(playerTeam.id);
   const breakdown = { ...empty };
 
@@ -271,11 +321,15 @@ export function calculateLeaderboard(data, points = DEFAULT_POINTS) {
     })
     .map((player) => {
       const completedRounds = data.rounds.filter((round) => round.status === STATES.COMPLETE);
-      const roundBreakdowns = completedRounds.map((round) => ({
-        roundId: round.id,
-        roundName: round.name,
-        ...calculatePlayerPointBreakdown(round, player.id, points),
-      }));
+      const roundBreakdowns = completedRounds.map((round) => {
+        const course = data.courses.find((item) => item.id === round.courseId) || data.courses[0] || defaultCourse();
+        return {
+          roundId: round.id,
+          roundName: round.name,
+          gameMode: round.gameMode || "SCRAMBLE",
+          ...calculatePlayerPointBreakdown(round, player.id, points, course),
+        };
+      });
       return {
         playerId: player.id,
         name: player.name,
@@ -445,7 +499,7 @@ function renderDashboard() {
               <div class="row">
                 <div>
                   <strong>${escapeHtml(round.name)}</strong>
-                  <div class="tiny">${escapeHtml(course.name)} · ${completeText}</div>
+                  <div class="tiny">${escapeHtml(course.name)} · ${gameModeFor(round).label} · ${completeText}</div>
                 </div>
                 <span class="status ${status}">${statusLabel(status)}</span>
               </div>
@@ -458,15 +512,16 @@ function renderDashboard() {
   `;
 }
 function renderRoundScoreSummary(round) {
-  const teams = round.teams.map((team) => ({ team, total: calculateTeamTotal(round, team.id) }));
   const course = courseFor(round);
+  const mode = gameModeFor(round);
+  const teams = round.teams.map((team) => ({ team, total: calculateScoringTotal(round, team.id, course) }));
   const entered = scoredHoleCount(round, course);
   const expected = round.teams.length * course.holes.length;
   return h`
     <section class="section card score-summary">
-      <div class="section-header"><h2>Round totals</h2><span class="tiny">${entered} / ${expected} scores entered</span></div>
+      <div class="section-header"><h2>Round totals</h2><span class="tiny">${mode.totalLabel} · ${entered} / ${expected} scores entered</span></div>
       <div class="summary-grid">
-        ${teams.map(({ team, total }) => `<div><span>${escapeHtml(teamShortLabel(team))}</span><strong>${total || "—"}</strong></div>`).join("")}
+        ${teams.map(({ team }) => `<div><span>${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</span><strong>${displayScoringTotal(round, team.id, course)}</strong></div>`).join("")}
       </div>
     </section>
   `;
@@ -480,7 +535,7 @@ function renderRound() {
   const missing = [];
   const missingScores = round.teams.length * course.holes.length - scoredHoleCount(round, course);
   if (!complete) {
-    if (playableTeams(round).length < 2) missing.push("2 teams required");
+    if (playableTeams(round).length < 2) missing.push("2 " + scoringEntityName(round) + " required");
     if (missingScores > 0) missing.push(missingScores + " score" + (missingScores === 1 ? "" : "s"));
     if (!round.awards.longestDrivePlayerId) missing.push("LD not selected");
     if (!round.awards.nearestPinPlayerId) missing.push("NP not selected");
@@ -490,7 +545,7 @@ function renderRound() {
       <div class="row wrap">
         <div>
           <h2 class="screen-title">${escapeHtml(round.name)}</h2>
-          <div class="muted">${escapeHtml(course.name)} · ${round.locked ? "Locked" : statusLabel(derivedRoundStatus(round, course))}</div>
+          <div class="muted">${escapeHtml(course.name)} · ${gameModeFor(round).label} · ${round.locked ? "Locked" : statusLabel(derivedRoundStatus(round, course))}</div>
         </div>
         <button class="${round.locked ? "secondary" : "ghost"}" data-toggle-lock="${round.id}">${round.locked ? "Unlock" : "Lock"}</button>
       </div>
@@ -536,15 +591,14 @@ function renderPlayerOptions(selectedId = "", round = null) {
 }
 
 function renderScorecard(round, course, team) {
-  const total = calculateTeamTotal(round, team.id);
   return h`
     <details class="card scorecard" open>
       <summary class="scorecard-head row">
         <div>
-          <strong>${escapeHtml(teamLabel(team))}</strong>
-          <div class="tiny">${teamShortLabel(team)} · adjust with plus/minus</div>
+          <strong>${escapeHtml(teamLabel(team, round))}</strong>
+          <div class="tiny">${round.gameMode === "STABLEFORD" ? "Stableford points calculate from strokes" : teamShortLabel(team) + " · adjust with plus/minus"}</div>
         </div>
-        <span class="pill">${total || "—"}</span>
+        <span class="pill">${displayScoringTotal(round, team.id, course)}</span>
       </summary>
       <table class="score-table">
         <thead><tr><th>Hole</th><th>Par</th><th>Score</th></tr></thead>
@@ -648,7 +702,7 @@ function renderLeaderboardBreakdown(leaderboard) {
         ${selected.roundBreakdowns.map((round) => h`
           <article class="breakdown-round">
             <div class="row">
-              <strong>${escapeHtml(round.roundName)}</strong>
+              <div><strong>${escapeHtml(round.roundName)}</strong><div class="tiny">${gameModeFor(round).label}</div></div>
               <span class="pill">${round.total}</span>
             </div>
             <div class="round-points">
@@ -669,27 +723,26 @@ function renderRoundSummary() {
   const round = state.rounds.find((item) => item.id === activeRoundId && item.status === STATES.COMPLETE) || state.rounds.find((item) => item.status === STATES.COMPLETE);
   if (!round) return `<section class="card">Complete a round to see a summary.</section>`;
   const course = courseFor(round);
-  const winners = calculateRoundWinner(round);
+  const winners = calculateRoundWinner(round, course);
   const clutchTeamId = calculateClutchWinner(round);
   const playerIds = [...new Set(round.teams.flatMap((team) => team.playerIds))];
   return h`
     <section class="hero-panel summary-hero">
       <p class="tiny">Round complete</p>
       <h2 class="screen-title">${escapeHtml(round.name)}</h2>
-      <p>${escapeHtml(course.name)}</p>
+      <p>${escapeHtml(course.name)} · ${gameModeFor(round).label}</p>
     </section>
     <section class="section stack">
       ${round.teams.map((team) => {
-        const total = calculateTeamTotal(round, team.id);
         const winner = winners.includes(team.id);
         return h`
           <article class="card summary-team ${winner ? "summary-winner" : ""}">
             <div class="row">
               <div>
-                <strong>${escapeHtml(teamLabel(team))}</strong>
-                <div class="tiny">${winner ? "Winning team" : "Team total"}</div>
+                <strong>${escapeHtml(teamLabel(team, round))}</strong>
+                <div class="tiny">${winner ? "Winning " + (isIndividualMode(round) ? "player" : "team") : gameModeFor(round).totalLabel}</div>
               </div>
-              <span class="pill">${total}</span>
+              <span class="pill">${calculateScoringTotal(round, team.id, course)}</span>
             </div>
           </article>
         `;
@@ -700,14 +753,14 @@ function renderRoundSummary() {
       <div class="round-points">
         <span>LD: ${escapeHtml(playerName(round.awards.longestDrivePlayerId))}</span>
         <span>NP: ${escapeHtml(playerName(round.awards.nearestPinPlayerId))}</span>
-        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeamId ? escapeHtml(teamLabel(round.teams.find((team) => team.id === clutchTeamId))) : "No winner"}</span>`}
+        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeamId ? escapeHtml(teamLabel(round.teams.find((team) => team.id === clutchTeamId), round)) : "No winner"}</span>`}
       </div>
     </section>
     <section class="section card point-breakdown">
       <div class="section-header"><h2>Points Awarded</h2><span class="tiny">This round</span></div>
       <div class="stack">
         ${playerIds.map((playerId) => {
-          const points = calculatePlayerPoints(round, playerId);
+          const points = calculatePlayerPoints(round, playerId, DEFAULT_POINTS, course);
           return `<div class="row"><strong>${escapeHtml(playerName(playerId))}</strong><span class="pill">${points}</span></div>`;
         }).join("") || `<div class="tiny">No players assigned.</div>`}
       </div>
@@ -798,6 +851,7 @@ function renderRoundsSetup() {
       ${activePlayers().length < 2 ? `<div class="card warning">Add at least 2 active players before creating rounds.</div>` : ""}
       ${state.rounds.map((round) => {
         const locked = Boolean(round.locked);
+        const sourceLocked = roundHasSourceData(round);
         return h`
           <article class="card form-grid">
             ${locked ? `<div class="warning setup-warning">Round is locked. Unlock it on the round screen before editing setup.</div>` : ""}
@@ -806,6 +860,12 @@ function renderRoundsSetup() {
               <select class="select" data-round-course="${round.id}" ${locked ? "disabled" : ""}>
                 ${state.courses.map((course) => `<option value="${course.id}" ${course.id === round.courseId ? "selected" : ""}>${escapeHtml(course.name)}</option>`).join("")}
               </select>
+            </label>
+            <label class="field"><span>Game mode</span>
+              <select class="select" data-round-mode="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>
+                ${Object.entries(GAME_MODES).map(([id, mode]) => `<option value="${id}" ${round.gameMode === id ? "selected" : ""}>${mode.label}</option>`).join("")}
+              </select>
+              <span class="tiny">${sourceLocked ? "Mode locks after scores or awards exist." : isIndividualMode(round) ? "Individual scorecards, one player per card." : "Team scorecards for scramble."}</span>
             </label>
             <div class="row wrap">
               <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
@@ -816,12 +876,12 @@ function renderRoundsSetup() {
               <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked ? "disabled" : ""} /></label>
               <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked ? "disabled" : ""} /></label>
             </div>
-            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>Add team</button></div>
-            <div class="section-header"><h2>Teams</h2><span class="tiny">${round.teams.length} teams</span></div>
+            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>${isIndividualMode(round) ? "Add player card" : "Add team"}</button></div>
+            <div class="section-header"><h2>${isIndividualMode(round) ? "Players" : "Teams"}</h2><span class="tiny">${round.teams.length} ${isIndividualMode(round) ? "scorecards" : "teams"}</span></div>
             <div class="stack">
               ${round.teams.map((team, teamIndex) => h`
                 <div class="team-block">
-                  <div class="row"><strong>Team ${teamIndex + 1} · ${escapeHtml(teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
+                  <div class="row"><strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
                   <div class="team-picker">
                     ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
                   </div>
@@ -861,6 +921,7 @@ function bindEvents(app) {
   app.querySelectorAll("[data-duplicate-round]").forEach((button) => button.addEventListener("click", () => duplicateRound(button.dataset.duplicateRound)));
   app.querySelectorAll("[data-round-name]").forEach((input) => input.addEventListener("change", () => updateRoundName(input.dataset.roundName, input.value)));
   app.querySelectorAll("[data-round-course]").forEach((select) => select.addEventListener("change", () => updateRoundCourse(select.dataset.roundCourse, select.value)));
+  app.querySelectorAll("[data-round-mode]").forEach((select) => select.addEventListener("change", () => updateRoundGameMode(select.dataset.roundMode, select.value)));
   app.querySelectorAll("[data-round-hole]").forEach((input) => input.addEventListener("change", () => updateRoundHole(input.dataset.roundHole, input.value)));
   app.querySelectorAll("[data-round-notes]").forEach((input) => input.addEventListener("change", () => updateRoundNotes(input.dataset.roundNotes, input.value)));
   app.querySelectorAll("[data-toggle-clutch]").forEach((button) => button.addEventListener("click", () => toggleClutch(button.dataset.toggleClutch)));
@@ -1004,6 +1065,7 @@ function addRound() {
     draft.rounds.push({
       id: uid("round"),
       name: `Day ${draft.rounds.length + 1}`,
+      gameMode: "SCRAMBLE",
       courseId: draft.courses[0]?.id,
       teams: [
         { id: uid("team"), playerIds: players.slice(0, midpoint).map((player) => player.id) },
@@ -1057,6 +1119,30 @@ function updateRoundCourse(roundId, courseId) {
       round.courseId = courseId;
       syncRoundStatus(draft, roundId);
     }
+  });
+}
+
+function buildDefaultTeamsForMode(modeId, players) {
+  if (GAME_MODES[modeId]?.scoring === "player") {
+    return players.map((player) => ({ id: uid("team"), playerIds: [player.id] }));
+  }
+  const midpoint = Math.ceil(players.length / 2);
+  return [
+    { id: uid("team"), playerIds: players.slice(0, midpoint).map((player) => player.id) },
+    { id: uid("team"), playerIds: players.slice(midpoint).map((player) => player.id) },
+  ];
+}
+
+function updateRoundGameMode(roundId, modeId) {
+  if (!GAME_MODES[modeId]) return;
+  setState((draft) => {
+    const round = draft.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked || roundHasSourceData(round)) return;
+    round.gameMode = modeId;
+    round.teams = buildDefaultTeamsForMode(modeId, activePlayers(draft));
+    round.scoresByHole = {};
+    round.awards = { longestDrivePlayerId: "", nearestPinPlayerId: "" };
+    syncRoundStatus(draft, roundId);
   });
 }
 
@@ -1117,7 +1203,7 @@ function toggleTeamPlayer(payload) {
       team.playerIds = team.playerIds.filter((id) => id !== playerId);
     });
     const team = round.teams.find((item) => item.id === teamId);
-    if (team) team.playerIds.push(playerId);
+    if (team) team.playerIds = isIndividualMode(round) ? [playerId] : [...team.playerIds, playerId];
     cleanRoundAwards(round);
     syncRoundStatus(draft, roundId);
   });
