@@ -26,38 +26,14 @@ const defaultCourse = () => ({
 });
 
 const starterData = () => {
-  const players = ["Alex", "Ben", "Chris", "Drew", "Evan", "Finn"].map((name) => ({
-    id: uid("player"),
-    name,
-    handicap: "",
-    active: true,
-  }));
   const course = defaultCourse();
-  const teamA = { id: uid("team"), playerIds: [players[0].id, players[1].id, players[2].id] };
-  const teamB = { id: uid("team"), playerIds: [players[3].id, players[4].id, players[5].id] };
-
   return {
     version: 1,
     lastView: "rounds",
     lastRoundId: "",
-    players,
+    players: [],
     courses: [course],
-    rounds: [
-      {
-        id: uid("round"),
-        name: "Day 1",
-        courseId: course.id,
-        teams: [teamA, teamB],
-        scoresByHole: {},
-        awards: { longestDrivePlayerId: "", nearestPinPlayerId: "" },
-        clutchHole: 18,
-        longestDriveHole: 9,
-        nearestPinHole: 12,
-        status: STATES.NOT_STARTED,
-        locked: false,
-        updatedAt: todayIso(),
-      },
-    ],
+    rounds: [],
   };
 };
 
@@ -65,6 +41,8 @@ let state = loadState();
 let view = state.lastView || "rounds";
 let setupTab = "players";
 let activeRoundId = state.lastRoundId || state.rounds[0]?.id || "";
+let selectedLeaderboardPlayerId = "";
+let storageWarning = "";
 
 function loadState() {
   try {
@@ -91,7 +69,6 @@ function normalizeData(data) {
   clean.players = clean.players.map((player) => ({
     id: player.id || uid("player"),
     name: player.name || "Player",
-    handicap: player.handicap ?? "",
     active: player.active !== false,
   }));
   clean.rounds = clean.rounds.map((round) => ({
@@ -102,6 +79,7 @@ function normalizeData(data) {
     scoresByHole: round.scoresByHole || {},
     awards: round.awards || { longestDrivePlayerId: "", nearestPinPlayerId: "" },
     clutchHole: Number(round.clutchHole) || 18,
+    clutchEnabled: round.clutchEnabled !== false,
     longestDriveHole: Number(round.longestDriveHole) || 9,
     nearestPinHole: Number(round.nearestPinHole) || 12,
     status: Object.values(STATES).includes(round.status) ? round.status : STATES.NOT_STARTED,
@@ -113,7 +91,15 @@ function normalizeData(data) {
 
 function saveState() {
   const next = { ...state, lastView: view, lastRoundId: activeRoundId };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    storageWarning = "";
+    return true;
+  } catch (error) {
+    storageWarning = "Changes are only kept until this tab closes. Browser storage is unavailable.";
+    console.warn("Save failed.", error);
+    return false;
+  }
 }
 
 function setState(mutator) {
@@ -143,6 +129,20 @@ function teamLabel(team) {
 
 function activePlayers(data = state) {
   return data.players.filter((player) => player.active);
+}
+
+function roundHasSourceData(round) {
+  const hasScores = Object.values(round.scoresByHole || {}).some((scores) => Object.keys(scores || {}).length > 0);
+  return hasScores || Boolean(round.awards.longestDrivePlayerId || round.awards.nearestPinPlayerId) || round.status !== STATES.NOT_STARTED;
+}
+
+function playerIsUsed(playerId, data = state) {
+  return data.rounds.some((round) => {
+    if (!roundHasSourceData(round)) return false;
+    const onTeam = round.teams.some((team) => team.playerIds.includes(playerId));
+    const hasAward = round.awards.longestDrivePlayerId === playerId || round.awards.nearestPinPlayerId === playerId;
+    return onTeam || hasAward;
+  });
 }
 
 function teamScore(round, teamId, holeNumber) {
@@ -179,7 +179,7 @@ export function calculateRoundWinner(round) {
 }
 
 export function calculateClutchWinner(round) {
-  if (round.status !== STATES.COMPLETE) return "";
+  if (round.status !== STATES.COMPLETE || round.clutchEnabled === false) return "";
   const hole = String(round.clutchHole);
   const scores = round.teams
     .map((team) => ({ teamId: team.id, score: Number(round.scoresByHole?.[team.id]?.[hole]) }))
@@ -221,7 +221,7 @@ function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS)
     breakdown.result = "Loss";
   }
 
-  breakdown.clutchPoints = calculateClutchWinner(round) === playerTeam.id ? points.clutch : 0;
+  breakdown.clutchPoints = round.clutchEnabled === false ? 0 : calculateClutchWinner(round) === playerTeam.id ? points.clutch : 0;
   breakdown.longestDrivePoints = round.awards.longestDrivePlayerId === playerId ? points.longestDrive : 0;
   breakdown.nearestPinPoints = round.awards.nearestPinPlayerId === playerId ? points.nearestPin : 0;
   breakdown.total = breakdown.resultPoints + breakdown.clutchPoints + breakdown.longestDrivePoints + breakdown.nearestPinPoints;
@@ -230,7 +230,15 @@ function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS)
 
 export function calculateLeaderboard(data, points = DEFAULT_POINTS) {
   const rows = data.players
-    .filter((player) => player.active)
+    .filter((player) => {
+      if (player.active) return true;
+      return data.rounds.some((round) => {
+        if (round.status !== STATES.COMPLETE) return false;
+        const onTeam = round.teams.some((team) => team.playerIds.includes(player.id));
+        const hasAward = round.awards.longestDrivePlayerId === player.id || round.awards.nearestPinPlayerId === player.id;
+        return onTeam || hasAward;
+      });
+    })
     .map((player) => {
       const completedRounds = data.rounds.filter((round) => round.status === STATES.COMPLETE);
       const roundBreakdowns = completedRounds.map((round) => ({
@@ -312,11 +320,12 @@ function render() {
     <header class="topbar">
       <div class="brand">
         <h1>Golf Trip App</h1>
+        ${view === "leaderboard" ? `<button class="icon-btn" data-export-image aria-label="Export leaderboard image" title="Export leaderboard image">⇩</button>` : ""}
       </div>
     </header>
-    <main class="main">${renderView()}</main>
+    <main class="main">${storageWarning ? `<section class="card warning">${escapeHtml(storageWarning)}</section>` : ""}${renderView()}</main>
     <nav class="bottom-nav">
-      <button class="nav-btn ${view === "rounds" || view === "round" ? "active" : ""}" data-go="rounds">Rounds</button>
+      <button class="nav-btn ${view === "rounds" || view === "round" || view === "summary" ? "active" : ""}" data-go="rounds">Rounds</button>
       <button class="nav-btn ${view === "leaderboard" ? "active" : ""}" data-go="leaderboard">Leaderboard</button>
       <button class="nav-btn ${view === "setup" ? "active" : ""}" data-go="setup">Setup</button>
     </nav>
@@ -328,6 +337,7 @@ function renderView() {
   if (view === "leaderboard") return renderLeaderboard();
   if (view === "setup") return renderSetup();
   if (view === "round") return renderRound();
+  if (view === "summary") return renderRoundSummary();
   return renderDashboard();
 }
 
@@ -464,6 +474,7 @@ function renderScorecard(round, course, team) {
 
 function renderLeaderboard() {
   const leaderboard = calculateLeaderboard(state);
+  const clutchActive = state.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
   const leaders = leaderboard.filter((row) => row.rank === 1);
   const leaderPoints = leaders[0]?.points ?? 0;
   const leaderNames = leaders.map((row) => row.name).join(" / ");
@@ -481,35 +492,142 @@ function renderLeaderboard() {
         <tbody>
           ${leaderboard.map((row) => h`
             <tr class="rank-${row.rank <= 3 ? row.rank : ""}">
-              <td>${row.rank}</td>
-              <td><strong>${escapeHtml(row.name)}</strong></td>
-              <td>
+              <td data-label="Rank">${row.rank}</td>
+              <td data-label="Player"><button class="leader-name" data-leader-player="${row.playerId}">${escapeHtml(row.name)}</button></td>
+              <td data-label="Bonus">
                 <div class="leader-detail">
                   <span>LD ${row.longestDrivePoints}</span>
                   <span>NP ${row.nearestPinPoints}</span>
-                  <span>Clutch ${row.clutchPoints}</span>
+                  ${clutchActive ? `<span>Clutch ${row.clutchPoints}</span>` : ""}
                 </div>
               </td>
-              <td>${row.points}</td>
+              <td data-label="Points">${row.points}</td>
             </tr>
           `).join("")}
         </tbody>
       </table>
     </section>
-    <section class="section export-card">
-      <button class="secondary" data-export-image>Export leaderboard image</button>
+    ${renderLeaderboardBreakdown(leaderboard)}
+  `;
+}
+
+function renderLeaderboardBreakdown(leaderboard) {
+  const selected = leaderboard.find((row) => row.playerId === selectedLeaderboardPlayerId);
+  if (!selected) return "";
+  return h`
+    <section class="section card point-breakdown">
+      <div class="row">
+        <div>
+          <h2>${escapeHtml(selected.name)}</h2>
+          <div class="tiny">${selected.points} total points</div>
+        </div>
+        <button class="ghost" data-close-breakdown>Close</button>
+      </div>
+      <div class="breakdown-total-grid">
+        <div><strong>${selected.resultPoints}</strong><span>Result</span></div>
+        <div><strong>${selected.longestDrivePoints}</strong><span>LD</span></div>
+        <div><strong>${selected.nearestPinPoints}</strong><span>NP</span></div>
+        ${selected.clutchPoints > 0 ? `<div><strong>${selected.clutchPoints}</strong><span>Clutch</span></div>` : ""}
+      </div>
+      <div class="stack">
+        ${selected.roundBreakdowns.map((round) => h`
+          <article class="breakdown-round">
+            <div class="row">
+              <strong>${escapeHtml(round.roundName)}</strong>
+              <span class="pill">${round.total}</span>
+            </div>
+            <div class="round-points">
+              <span>${round.result}: ${round.resultPoints}</span>
+              ${round.longestDrivePoints ? `<span>LD +${round.longestDrivePoints}</span>` : ""}
+              ${round.nearestPinPoints ? `<span>NP +${round.nearestPinPoints}</span>` : ""}
+              ${round.clutchPoints ? `<span>Clutch +${round.clutchPoints}</span>` : ""}
+            </div>
+          </article>
+        `).join("") || `<div class="tiny">No completed rounds yet.</div>`}
+      </div>
     </section>
   `;
 }
+
+
+function renderRoundSummary() {
+  const round = state.rounds.find((item) => item.id === activeRoundId && item.status === STATES.COMPLETE) || state.rounds.find((item) => item.status === STATES.COMPLETE);
+  if (!round) return `<section class="card">Complete a round to see a summary.</section>`;
+  const course = courseFor(round);
+  const winners = calculateRoundWinner(round);
+  const clutchTeamId = calculateClutchWinner(round);
+  const playerIds = [...new Set(round.teams.flatMap((team) => team.playerIds))];
+  return h`
+    <section class="hero-panel summary-hero">
+      <p class="tiny">Round complete</p>
+      <h2 class="screen-title">${escapeHtml(round.name)}</h2>
+      <p>${escapeHtml(course.name)}</p>
+    </section>
+    <section class="section stack">
+      ${round.teams.map((team) => {
+        const total = calculateTeamTotal(round, team.id);
+        const winner = winners.includes(team.id);
+        return h`
+          <article class="card summary-team ${winner ? "summary-winner" : ""}">
+            <div class="row">
+              <div>
+                <strong>${escapeHtml(teamLabel(team))}</strong>
+                <div class="tiny">${winner ? "Winning team" : "Team total"}</div>
+              </div>
+              <span class="pill">${total}</span>
+            </div>
+          </article>
+        `;
+      }).join("")}
+    </section>
+    <section class="section card point-breakdown">
+      <div class="section-header"><h2>Awards</h2><span class="tiny">Bonus points</span></div>
+      <div class="round-points">
+        <span>LD: ${escapeHtml(playerName(round.awards.longestDrivePlayerId))}</span>
+        <span>NP: ${escapeHtml(playerName(round.awards.nearestPinPlayerId))}</span>
+        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeamId ? escapeHtml(teamLabel(round.teams.find((team) => team.id === clutchTeamId))) : "No winner"}</span>`}
+      </div>
+    </section>
+    <section class="section card point-breakdown">
+      <div class="section-header"><h2>Points Awarded</h2><span class="tiny">This round</span></div>
+      <div class="stack">
+        ${playerIds.map((playerId) => {
+          const points = calculatePlayerPoints(round, playerId);
+          return `<div class="row"><strong>${escapeHtml(playerName(playerId))}</strong><span class="pill">${points}</span></div>`;
+        }).join("") || `<div class="tiny">No players assigned.</div>`}
+      </div>
+    </section>
+    <section class="section button-grid">
+      <button class="secondary" data-open-round="${round.id}">Edit Round</button>
+      <button class="primary" data-go="leaderboard">View Leaderboard</button>
+    </section>
+  `;
+}
+
+function renderBackupSetup() {
+  return h`
+    <div class="stack">
+      <article class="card form-grid">
+        <div>
+          <strong>Trip backup</strong>
+          <div class="tiny">Exports players, courses, rounds, scores, awards, teams, and locks. No calculated leaderboard data is stored.</div>
+        </div>
+        <button class="primary" data-export-backup>Export backup</button>
+        <label class="field"><span>Restore backup</span><input class="input" type="file" accept="application/json" data-import-backup /></label>
+      </article>
+    </div>
+  `;
+}
+
 
 function renderSetup() {
   return h`
     <section>
       <h2 class="screen-title">Setup</h2>
       <div class="tabs">
-        ${["players", "courses", "rounds"].map((tab) => `<button class="tab ${setupTab === tab ? "active" : ""}" data-setup-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
+        ${["players", "courses", "rounds", "backup"].map((tab) => `<button class="tab ${setupTab === tab ? "active" : ""}" data-setup-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
       </div>
-      ${setupTab === "players" ? renderPlayersSetup() : setupTab === "courses" ? renderCoursesSetup() : renderRoundsSetup()}
+      ${setupTab === "players" ? renderPlayersSetup() : setupTab === "courses" ? renderCoursesSetup() : setupTab === "rounds" ? renderRoundsSetup() : renderBackupSetup()}
     </section>
   `;
 }
@@ -518,22 +636,22 @@ function renderPlayersSetup() {
   return h`
     <div class="stack">
       <form class="card form-grid" data-add-player>
-        <div class="two-col">
-          <label class="field"><span>Name</span><input class="input" name="name" required /></label>
-          <label class="field"><span>Handicap</span><input class="input" name="handicap" inputmode="decimal" /></label>
-        </div>
+        <label class="field"><span>Name</span><input class="input" name="name" required /></label>
         <button class="primary">Add player</button>
       </form>
-      ${state.players.map((player) => h`
-        <article class="card form-grid">
-          <label class="field"><span>Player</span><input class="input" value="${escapeHtml(player.name)}" data-player-name="${player.id}" /></label>
-          <div class="row">
-            <button class="chip ${player.active ? "selected" : ""}" data-toggle-player="${player.id}">${player.active ? "Active" : "Inactive"}</button>
-            <button class="danger" data-remove-player="${player.id}">Remove</button>
-          </div>
-          <span class="tiny">Renames keep scoring intact. Remove also clears this player from teams and awards.</span>
-        </article>
-      `).join("")}
+      ${state.players.map((player) => {
+        const used = playerIsUsed(player.id);
+        return h`
+          <article class="card form-grid">
+            <label class="field"><span>Player</span><input class="input" value="${escapeHtml(player.name)}" data-player-name="${player.id}" /></label>
+            <div class="row">
+              <button class="chip ${player.active ? "selected" : ""}" data-toggle-player="${player.id}">${player.active ? "Active" : "Inactive"}</button>
+              <button class="danger" data-remove-player="${player.id}" ${used ? "disabled" : ""}>${used ? "In use" : "Remove"}</button>
+            </div>
+            <span class="tiny">${used ? "This player has recorded round data, so they cannot be removed without changing history." : "Remove clears this player from unplayed setup rounds."}</span>
+          </article>
+        `;
+      }).join("")}
     </div>
   `;
 }
@@ -562,32 +680,40 @@ function renderRoundsSetup() {
   return h`
     <div class="stack">
       <button class="primary" data-add-round>Add round</button>
-      ${state.rounds.map((round) => h`
-        <article class="card form-grid">
-          <label class="field"><span>Round name</span><input class="input" value="${escapeHtml(round.name)}" data-round-name="${round.id}" /></label>
-          <label class="field"><span>Course</span>
-            <select class="select" data-round-course="${round.id}">
-              ${state.courses.map((course) => `<option value="${course.id}" ${course.id === round.courseId ? "selected" : ""}>${escapeHtml(course.name)}</option>`).join("")}
-            </select>
-          </label>
-          <div class="three-col">
-            <label class="field"><span>Clutch hole</span><input class="input" inputmode="numeric" value="${round.clutchHole}" data-round-hole="${round.id}|clutchHole" /></label>
-            <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" /></label>
-            <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" /></label>
-          </div>
-          <div class="section-header"><h2>Teams</h2><button class="secondary" data-add-team="${round.id}">Add team</button></div>
-          <div class="stack">
-            ${round.teams.map((team, teamIndex) => h`
-              <div class="team-block">
-                <div class="row"><strong>Team ${teamIndex + 1}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}">Remove</button></div>
-                <div class="team-picker">
-                  ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}">${escapeHtml(player.name)}</button>`).join("")}
+      ${state.rounds.map((round) => {
+        const locked = Boolean(round.locked);
+        return h`
+          <article class="card form-grid">
+            ${locked ? `<div class="warning setup-warning">Round is locked. Unlock it on the round screen before editing setup.</div>` : ""}
+            <label class="field"><span>Round name</span><input class="input" value="${escapeHtml(round.name)}" data-round-name="${round.id}" ${locked ? "disabled" : ""} /></label>
+            <label class="field"><span>Course</span>
+              <select class="select" data-round-course="${round.id}" ${locked ? "disabled" : ""}>
+                ${state.courses.map((course) => `<option value="${course.id}" ${course.id === round.courseId ? "selected" : ""}>${escapeHtml(course.name)}</option>`).join("")}
+              </select>
+            </label>
+            <div class="row wrap">
+              <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
+              <span class="tiny">When off, no clutch bonus is awarded for this round.</span>
+            </div>
+            <div class="three-col">
+              <label class="field"><span>Clutch hole</span><input class="input" inputmode="numeric" value="${round.clutchHole}" data-round-hole="${round.id}|clutchHole" ${locked || round.clutchEnabled === false ? "disabled" : ""} /></label>
+              <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked ? "disabled" : ""} /></label>
+              <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked ? "disabled" : ""} /></label>
+            </div>
+            <div class="section-header"><h2>Teams</h2><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>Add team</button></div>
+            <div class="stack">
+              ${round.teams.map((team, teamIndex) => h`
+                <div class="team-block">
+                  <div class="row"><strong>Team ${teamIndex + 1}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
+                  <div class="team-picker">
+                    ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
+                  </div>
                 </div>
-              </div>
-            `).join("")}
-          </div>
-        </article>
-      `).join("")}
+              `).join("")}
+            </div>
+          </article>
+        `;
+      }).join("")}
     </div>
   `;
 }
@@ -618,10 +744,15 @@ function bindEvents(app) {
   app.querySelectorAll("[data-round-name]").forEach((input) => input.addEventListener("change", () => updateRoundName(input.dataset.roundName, input.value)));
   app.querySelectorAll("[data-round-course]").forEach((select) => select.addEventListener("change", () => updateRoundCourse(select.dataset.roundCourse, select.value)));
   app.querySelectorAll("[data-round-hole]").forEach((input) => input.addEventListener("change", () => updateRoundHole(input.dataset.roundHole, input.value)));
+  app.querySelectorAll("[data-toggle-clutch]").forEach((button) => button.addEventListener("click", () => toggleClutch(button.dataset.toggleClutch)));
   app.querySelectorAll("[data-add-team]").forEach((button) => button.addEventListener("click", () => addTeam(button.dataset.addTeam)));
   app.querySelectorAll("[data-remove-team]").forEach((button) => button.addEventListener("click", () => removeTeam(button.dataset.removeTeam)));
   app.querySelectorAll("[data-toggle-team-player]").forEach((button) => button.addEventListener("click", () => toggleTeamPlayer(button.dataset.toggleTeamPlayer)));
   app.querySelectorAll("[data-export-image]").forEach((button) => button.addEventListener("click", exportLeaderboardImage));
+  app.querySelectorAll("[data-leader-player]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = button.dataset.leaderPlayer; render(); }));
+  app.querySelectorAll("[data-close-breakdown]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = ""; render(); }));
+  app.querySelectorAll("[data-export-backup]").forEach((button) => button.addEventListener("click", exportBackup));
+  app.querySelectorAll("[data-import-backup]").forEach((input) => input.addEventListener("change", importBackup));
 }
 
 function changeScore(payload) {
@@ -654,7 +785,7 @@ function completeRound(roundId) {
   setState((draft) => {
     syncRoundStatus(draft, roundId, true);
   });
-  go("leaderboard", roundId);
+  go("summary", roundId);
 }
 
 function resetRound(roundId) {
@@ -684,7 +815,7 @@ function addPlayer(event) {
   const name = String(data.get("name") || "").trim();
   if (!name) return;
   setState((draft) => {
-    draft.players.push({ id: uid("player"), name, handicap: String(data.get("handicap") || ""), active: true });
+    draft.players.push({ id: uid("player"), name, active: true });
   });
 }
 
@@ -704,15 +835,14 @@ function togglePlayer(playerId) {
 
 function removePlayer(playerId) {
   setState((draft) => {
-    draft.players = draft.players.filter((player) => player.id !== playerId);
+    if (playerIsUsed(playerId, draft)) return;
     draft.rounds.forEach((round) => {
+      if (roundHasSourceData(round)) return;
       round.teams.forEach((team) => {
         team.playerIds = team.playerIds.filter((id) => id !== playerId);
       });
-      if (round.awards.longestDrivePlayerId === playerId) round.awards.longestDrivePlayerId = "";
-      if (round.awards.nearestPinPlayerId === playerId) round.awards.nearestPinPlayerId = "";
-      syncRoundStatus(draft, round.id);
     });
+    draft.players = draft.players.filter((player) => player.id !== playerId);
   });
 }
 
@@ -753,6 +883,7 @@ function addRound() {
       scoresByHole: {},
       awards: { longestDrivePlayerId: "", nearestPinPlayerId: "" },
       clutchHole: 18,
+      clutchEnabled: true,
       longestDriveHole: 9,
       nearestPinHole: 12,
       status: STATES.NOT_STARTED,
@@ -765,14 +896,14 @@ function addRound() {
 function updateRoundName(roundId, name) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && name.trim()) round.name = name.trim();
+    if (round && !round.locked && name.trim()) round.name = name.trim();
   });
 }
 
 function updateRoundCourse(roundId, courseId) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round) {
+    if (round && !round.locked) {
       round.courseId = courseId;
       syncRoundStatus(draft, roundId);
     }
@@ -783,14 +914,24 @@ function updateRoundHole(payload, value) {
   const [roundId, key] = payload.split("|");
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round) round[key] = Math.max(1, Math.min(18, Number(value) || round[key]));
+    if (round && !round.locked) round[key] = Math.max(1, Math.min(18, Number(value) || round[key]));
+  });
+}
+
+function toggleClutch(roundId) {
+  setState((draft) => {
+    const round = draft.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    round.clutchEnabled = round.clutchEnabled === false;
+    round.updatedAt = todayIso();
   });
 }
 
 function addTeam(roundId) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round) round.teams.push({ id: uid("team"), playerIds: [] });
+    if (!round || round.locked) return;
+    round.teams.push({ id: uid("team"), playerIds: [] });
     syncRoundStatus(draft, roundId);
   });
 }
@@ -820,41 +961,120 @@ function toggleTeamPlayer(payload) {
   });
 }
 
+
+function downloadFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportBackup() {
+  const backup = {
+    ...state,
+    exportedAt: todayIso(),
+  };
+  downloadFile("golf-trip-backup.json", JSON.stringify(backup, null, 2), "application/json");
+}
+
+function importBackup(event) {
+  const file = event.currentTarget.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const restored = normalizeData(JSON.parse(String(reader.result)));
+      state = restored;
+      activeRoundId = state.lastRoundId || state.rounds[0]?.id || "";
+      selectedLeaderboardPlayerId = "";
+      saveState();
+      render();
+    } catch (error) {
+      storageWarning = "Backup could not be restored. The file does not look valid.";
+      console.warn("Backup import failed.", error);
+      render();
+    }
+  };
+  reader.readAsText(file);
+}
+
 function exportLeaderboardImage() {
   const leaderboard = calculateLeaderboard(state);
-  const width = 900;
-  const height = Math.max(520, 190 + leaderboard.length * 58);
+  const clutchActive = state.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
+  const leaders = leaderboard.filter((row) => row.rank === 1);
+  const width = 1080;
+  const rowHeight = 92;
+  const topHeight = 240;
+  const height = Math.max(720, topHeight + leaderboard.length * rowHeight + 84);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const roundRect = (x, y, w, h, r) => {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  };
+
   ctx.fillStyle = "#F7F5EF";
   ctx.fillRect(0, 0, width, height);
   ctx.fillStyle = "#16392f";
-  ctx.font = "700 48px system-ui";
+  roundRect(44, 36, width - 88, 164, 18);
+
+  ctx.fillStyle = "#FFFFFF";
   ctx.textAlign = "center";
-  ctx.fillText("🏆 Golf Trip Leaderboard", width / 2, 82);
-  ctx.font = "600 30px system-ui";
-  const leaders = leaderboard.filter((row) => row.rank === 1);
-  ctx.fillText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width / 2, 132);
-  ctx.textAlign = "left";
-  ctx.font = "700 28px system-ui";
+  ctx.font = "800 52px system-ui";
+  ctx.fillText("Golf Trip Leaderboard", width / 2, 98);
+  ctx.font = "700 30px system-ui";
+  ctx.fillText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width / 2, 148);
+  ctx.font = "600 22px system-ui";
+  ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
+  ctx.fillText(`${state.rounds.filter((round) => round.status === STATES.COMPLETE).length} completed rounds`, width / 2, 178);
+
   leaderboard.forEach((row, index) => {
-    const y = 190 + index * 58;
+    const y = topHeight + index * rowHeight;
+    const x = 64;
+    const w = width - 128;
+    const h = 72;
     ctx.fillStyle = row.rank === 1 ? "#FFF4CC" : row.rank === 2 ? "#E6E6E6" : row.rank === 3 ? "#F4E1D2" : "#FFFFFF";
-    ctx.fillRect(70, y - 36, width - 140, 48);
-    ctx.fillStyle = "#16201d";
-    ctx.fillText(String(row.rank), 96, y);
-    ctx.fillText(row.name, 190, y - 6);
-    ctx.font = "600 18px system-ui";
-    ctx.fillStyle = "#6a746f";
-    ctx.fillText(`W-L-T ${row.wins}-${row.losses}-${row.ties} · Bonus ${row.clutchPoints + row.longestDrivePoints + row.nearestPinPoints}`, 190, y + 18);
-    ctx.font = "700 28px system-ui";
-    ctx.fillStyle = "#16201d";
-    ctx.textAlign = "right";
-    ctx.fillText(String(row.points), width - 100, y);
+    roundRect(x, y, w, h, 14);
+
+    ctx.fillStyle = "#16392f";
+    ctx.font = "900 28px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText(String(row.rank), x + 42, y + 46);
+
     ctx.textAlign = "left";
+    ctx.fillStyle = "#16201d";
+    ctx.font = "800 30px system-ui";
+    ctx.fillText(row.name, x + 86, y + 33);
+
+    ctx.fillStyle = "#6a746f";
+    ctx.font = "700 18px system-ui";
+    const detail = [`LD ${row.longestDrivePoints}`, `NP ${row.nearestPinPoints}`];
+    if (clutchActive) detail.push(`Clutch ${row.clutchPoints}`);
+    ctx.fillText(detail.join("   "), x + 86, y + 58);
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#16392f";
+    ctx.font = "900 34px system-ui";
+    ctx.fillText(String(row.points), x + w - 38, y + 46);
   });
+
   canvas.toBlob((blob) => {
     if (!blob) return;
     const url = URL.createObjectURL(blob);
@@ -864,6 +1084,15 @@ function exportLeaderboardImage() {
     link.click();
     URL.revokeObjectURL(url);
   }, "image/png");
+}
+
+
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch((error) => {
+      console.warn("Service worker registration failed.", error);
+    });
+  });
 }
 
 window.addEventListener("error", (event) => {
