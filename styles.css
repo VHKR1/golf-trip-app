@@ -542,10 +542,10 @@ input:disabled {
 
   .leaderboard tr {
     display: grid;
-    grid-template-columns: 44px 1fr auto;
+    grid-template-columns: 44px minmax(76px, auto) 1fr auto;
     grid-template-areas:
-      "rank player points"
-      "bonus bonus bonus";
+      "rank move player points"
+      "bonus bonus bonus bonus";
     gap: 10px 12px;
     padding: 14px;
     border-bottom: 1px solid var(--line);
@@ -568,6 +568,13 @@ input:disabled {
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.78);
     font-weight: 950;
+  }
+
+  .leaderboard td[data-label="Move"] {
+    grid-area: move;
+    display: grid;
+    place-items: center;
+    align-self: center;
   }
 
   .leaderboard td[data-label="Player"] {
@@ -690,6 +697,16 @@ input:disabled {
   }
 }
 
+.history-card {
+  display: grid;
+  gap: 8px;
+}
+
+.danger.confirming {
+  background: #7f2e28;
+  color: #fff;
+}
+
 .icon-btn {
   width: 44px;
   min-width: 44px;
@@ -715,4 +732,127 @@ input:disabled {
 .summary-team.summary-winner {
   border-color: #e4c34f;
   background: var(--gold);
+}
+
+.trend {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 0;
+  border-radius: 999px;
+  font-size: 1rem;
+  font-weight: 950;
+  vertical-align: middle;
+}
+
+.trend-up {
+  background: #dff1e8;
+  color: #19754f;
+}
+
+.trend-down {
+  background: #fae5e2;
+  color: #b84b42;
+}
+
+.trend-flat {
+  background: #fff4cc;
+  color: #9a6700;
+}
+
+@media (max-width: 560px) {
+  .leaderboard td[data-label="Player"] {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .trend {
+    flex: 0 0 auto;
+    margin-right: 4px;
+  }
+}
+
+.trend {
+  width: auto;
+  min-width: 30px;
+  padding: 0 8px;
+}
+
+@media (max-width: 560px) {
+  .point-breakdown {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    z-index: 30;
+    max-height: min(70vh, 560px);
+    overflow: auto;
+    box-shadow: 0 22px 70px rgba(22, 57, 47, 0.28);
+  }
+
+  .score-table th,
+  .score-table td {
+    padding: 8px 5px;
+  }
+}
+
+.scorecard summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.scorecard summary::-webkit-details-marker {
+  display: none;
+}
+
+
+.score-summary {
+  padding: 14px;
+}
+
+.score-summary .section-header {
+  margin-bottom: 10px;
+}
+
+.summary-grid {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+}
+
+.summary-grid::-webkit-scrollbar {
+  display: none;
+}
+
+.summary-grid div {
+  flex: 1 0 92px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfaf6;
+}
+
+.summary-grid span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+}
+
+.summary-grid strong {
+  color: var(--green);
+  font-size: 1.12rem;
+  font-weight: 950;
+}
+
+textarea.input {
+  resize: vertical;
 }

@@ -42,6 +42,8 @@ let view = state.lastView || "rounds";
 let setupTab = "players";
 let activeRoundId = state.lastRoundId || state.rounds[0]?.id || "";
 let selectedLeaderboardPlayerId = "";
+let leaderboardRoundId = "all";
+let pendingResetRoundId = "";
 let storageWarning = "";
 
 function loadState() {
@@ -82,6 +84,7 @@ function normalizeData(data) {
     clutchEnabled: round.clutchEnabled !== false,
     longestDriveHole: Number(round.longestDriveHole) || 9,
     nearestPinHole: Number(round.nearestPinHole) || 12,
+    notes: round.notes || "",
     status: Object.values(STATES).includes(round.status) ? round.status : STATES.NOT_STARTED,
     locked: Boolean(round.locked),
     updatedAt: round.updatedAt || todayIso(),
@@ -127,6 +130,18 @@ function teamLabel(team) {
   return team.playerIds.map(playerName).join(" / ") || "Empty team";
 }
 
+function teamShortLabel(team) {
+  const names = team.playerIds.map(playerName).filter((name) => name !== "Unknown");
+  if (!names.length) return "Empty";
+  return names.map((name) => name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()).join(" / ");
+}
+
+function nextActionRound() {
+  return state.rounds.find((round) => round.status === STATES.IN_PROGRESS)
+    || state.rounds.find((round) => round.status === STATES.NOT_STARTED)
+    || state.rounds[0];
+}
+
 function activePlayers(data = state) {
   return data.players.filter((player) => player.active);
 }
@@ -155,8 +170,23 @@ function scoredHoleCount(round, course) {
   }, 0);
 }
 
+function playableTeams(round) {
+  return round.teams.filter((team) => team.playerIds.length > 0);
+}
+
+function roundPlayerIds(round) {
+  return new Set(round.teams.flatMap((team) => team.playerIds));
+}
+
+function cleanRoundAwards(round) {
+  const assigned = roundPlayerIds(round);
+  if (!assigned.has(round.awards.longestDrivePlayerId)) round.awards.longestDrivePlayerId = "";
+  if (!assigned.has(round.awards.nearestPinPlayerId)) round.awards.nearestPinPlayerId = "";
+}
+
 function isRoundComplete(round, course) {
-  const allScored = round.teams.length > 0 && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
+  const hasEnoughTeams = playableTeams(round).length >= 2;
+  const allScored = hasEnoughTeams && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
   return Boolean(allScored && round.awards.longestDrivePlayerId && round.awards.nearestPinPlayerId);
 }
 
@@ -274,6 +304,37 @@ export function calculateLeaderboard(data, points = DEFAULT_POINTS) {
   });
 }
 
+
+function leaderboardDataThrough(roundId) {
+  if (!roundId || roundId === "all") return state;
+  const index = state.rounds.findIndex((round) => round.id === roundId);
+  if (index < 0) return state;
+  return { ...state, rounds: state.rounds.slice(0, index + 1) };
+}
+
+function calculateLeaderboardTrends(data) {
+  const completedRounds = data.rounds.filter((round) => round.status === STATES.COMPLETE);
+  const lastCompleted = completedRounds.at(-1);
+  const currentRows = calculateLeaderboard(data);
+  if (!lastCompleted || completedRounds.length < 2) {
+    return currentRows.map((row) => ({ ...row, trend: "flat", previousRank: row.rank }));
+  }
+
+  const previousData = {
+    ...data,
+    rounds: data.rounds.filter((round) => round.id !== lastCompleted.id),
+  };
+  const previousRanks = new Map(calculateLeaderboard(previousData).map((row) => [row.playerId, row.rank]));
+
+  return currentRows.map((row) => {
+    const previousRank = previousRanks.get(row.playerId);
+    let trend = "flat";
+    const movement = previousRank ? previousRank - row.rank : 0;
+    if (movement > 0) trend = "up";
+    else if (movement < 0) trend = "down";
+    return { ...row, trend, previousRank: previousRank || row.rank };
+  });
+}
 function syncRoundStatus(draft, roundId, forceComplete = false) {
   const round = draft.rounds.find((item) => item.id === roundId);
   if (!round) return;
@@ -289,6 +350,8 @@ function syncRoundStatus(draft, roundId, forceComplete = false) {
 function go(nextView, roundId = activeRoundId) {
   view = nextView;
   activeRoundId = roundId || activeRoundId;
+  selectedLeaderboardPlayerId = "";
+  pendingResetRoundId = "";
   saveState();
   render();
 }
@@ -313,6 +376,17 @@ function statusLabel(status) {
     [STATES.COMPLETE]: "✅ Complete",
   }[status];
 }
+
+function trendSymbol(row) {
+  if (!row || row.trend === "flat" || row.previousRank === row.rank) return "–";
+  const symbol = row.trend === "up" ? "▲" : "▼";
+  return symbol + " " + row.previousRank + "→" + row.rank;
+}
+
+function trendLabel(trend) {
+  return { up: "Moved up", down: "Moved down", flat: "No change" }[trend] || "No change";
+}
+
 
 function render() {
   const app = document.querySelector("#app");
@@ -342,13 +416,16 @@ function renderView() {
 }
 
 function renderDashboard() {
-  const resumeRound = state.rounds.find((round) => round.id === activeRoundId) || state.rounds.find((round) => round.status !== STATES.COMPLETE) || state.rounds[0];
+  const resumeRound = nextActionRound();
+  const nextText = resumeRound
+    ? `${resumeRound.status === STATES.COMPLETE ? "Review" : "Enter scores for"} ${resumeRound.name}`
+    : "Start setup";
   return h`
     <section class="hero-panel">
-      <p class="tiny">After-round entry</p>
-      <h2 class="screen-title">${resumeRound ? escapeHtml(resumeRound.name) : "Set up your trip"}</h2>
-      <p>${resumeRound ? escapeHtml(courseFor(resumeRound).name) : "Add players, courses, and rounds to begin."}</p>
-      <button class="primary" data-open-round="${resumeRound?.id || ""}">Resume last round</button>
+      <p class="tiny">Next action</p>
+      <h2 class="screen-title">${escapeHtml(nextText)}</h2>
+      <p>${resumeRound ? `${escapeHtml(courseFor(resumeRound).name)} · ${statusLabel(derivedRoundStatus(resumeRound, courseFor(resumeRound)))}` : "Add players, courses, and your first round."}</p>
+      <button class="primary" data-open-round="${resumeRound?.id || ""}">${resumeRound ? "Open round" : "Open setup"}</button>
     </section>
     <section class="section">
       <div class="button-grid">
@@ -380,6 +457,20 @@ function renderDashboard() {
     </section>
   `;
 }
+function renderRoundScoreSummary(round) {
+  const teams = round.teams.map((team) => ({ team, total: calculateTeamTotal(round, team.id) }));
+  const course = courseFor(round);
+  const entered = scoredHoleCount(round, course);
+  const expected = round.teams.length * course.holes.length;
+  return h`
+    <section class="section card score-summary">
+      <div class="section-header"><h2>Round totals</h2><span class="tiny">${entered} / ${expected} scores entered</span></div>
+      <div class="summary-grid">
+        ${teams.map(({ team, total }) => `<div><span>${escapeHtml(teamShortLabel(team))}</span><strong>${total || "—"}</strong></div>`).join("")}
+      </div>
+    </section>
+  `;
+}
 
 function renderRound() {
   const round = state.rounds.find((item) => item.id === activeRoundId) || state.rounds[0];
@@ -387,10 +478,12 @@ function renderRound() {
   const course = courseFor(round);
   const complete = isRoundComplete(round, course);
   const missing = [];
+  const missingScores = round.teams.length * course.holes.length - scoredHoleCount(round, course);
   if (!complete) {
-    if (scoredHoleCount(round, course) < round.teams.length * course.holes.length) missing.push("scores");
-    if (!round.awards.longestDrivePlayerId) missing.push("Longest Drive");
-    if (!round.awards.nearestPinPlayerId) missing.push("Nearest Pin");
+    if (playableTeams(round).length < 2) missing.push("2 teams required");
+    if (missingScores > 0) missing.push(missingScores + " score" + (missingScores === 1 ? "" : "s"));
+    if (!round.awards.longestDrivePlayerId) missing.push("LD not selected");
+    if (!round.awards.nearestPinPlayerId) missing.push("NP not selected");
   }
   return h`
     <section class="section">
@@ -402,7 +495,8 @@ function renderRound() {
         <button class="${round.locked ? "secondary" : "ghost"}" data-toggle-lock="${round.id}">${round.locked ? "Unlock" : "Lock"}</button>
       </div>
     </section>
-    ${missing.length ? `<section class="section card warning">Missing ${missing.join(", ")}.</section>` : ""}
+    ${missing.length ? `<section class="section card warning">Missing ${missing.join(" · ")}.</section>` : ""}
+    ${renderRoundScoreSummary(round)}
     <section class="section stack">
       ${round.teams.map((team) => renderScorecard(round, course, team)).join("")}
     </section>
@@ -412,26 +506,31 @@ function renderRound() {
         <label class="field"><span>Longest Drive · hole ${round.longestDriveHole}</span>
           <select class="select" data-award="longestDrivePlayerId" ${round.locked ? "disabled" : ""}>
             <option value="">Select player</option>
-            ${renderPlayerOptions(round.awards.longestDrivePlayerId)}
+            ${renderPlayerOptions(round.awards.longestDrivePlayerId, round)}
           </select>
         </label>
         <label class="field"><span>Nearest Pin · hole ${round.nearestPinHole}</span>
           <select class="select" data-award="nearestPinPlayerId" ${round.locked ? "disabled" : ""}>
             <option value="">Select player</option>
-            ${renderPlayerOptions(round.awards.nearestPinPlayerId)}
+            ${renderPlayerOptions(round.awards.nearestPinPlayerId, round)}
           </select>
         </label>
       </div>
     </section>
+    <section class="section card">
+      <label class="field"><span>Round notes</span><textarea class="input" rows="3" data-round-notes="${round.id}" ${round.locked ? "disabled" : ""}>${escapeHtml(round.notes || "")}</textarea></label>
+    </section>
     <section class="sticky-actions">
-      <button class="danger" data-reset-round="${round.id}" ${round.locked ? "disabled" : ""}>Reset</button>
+      <button class="danger ${pendingResetRoundId === round.id ? "confirming" : ""}" data-reset-round="${round.id}" ${round.locked ? "disabled" : ""}>${pendingResetRoundId === round.id ? "Tap again to reset" : "Reset"}</button>
       <button class="primary" data-complete-round="${round.id}" ${round.locked || !complete ? "disabled" : ""}>Complete Round</button>
     </section>
   `;
 }
 
-function renderPlayerOptions(selectedId = "") {
+function renderPlayerOptions(selectedId = "", round = null) {
+  const allowedIds = round ? roundPlayerIds(round) : null;
   return activePlayers()
+    .filter((player) => !allowedIds || allowedIds.has(player.id))
     .map((player) => `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(player.name)}</option>`)
     .join("");
 }
@@ -439,14 +538,14 @@ function renderPlayerOptions(selectedId = "") {
 function renderScorecard(round, course, team) {
   const total = calculateTeamTotal(round, team.id);
   return h`
-    <article class="card scorecard">
-      <div class="scorecard-head row">
+    <details class="card scorecard" open>
+      <summary class="scorecard-head row">
         <div>
           <strong>${escapeHtml(teamLabel(team))}</strong>
-          <div class="tiny">Team total updates instantly</div>
+          <div class="tiny">${teamShortLabel(team)} · adjust with plus/minus</div>
         </div>
         <span class="pill">${total || "—"}</span>
-      </div>
+      </summary>
       <table class="score-table">
         <thead><tr><th>Hole</th><th>Par</th><th>Score</th></tr></thead>
         <tbody>
@@ -457,10 +556,12 @@ function renderScorecard(round, course, team) {
                 <td>${hole.holeNumber}</td>
                 <td>${hole.par}</td>
                 <td>
-                  <div class="score-stepper">
-                    <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|-1" ${round.locked ? "disabled" : ""}>−</button>
-                    <span class="score-value">${value === "" ? "—" : value}</span>
-                    <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|1" ${round.locked ? "disabled" : ""}>+</button>
+                  <div class="score-entry">
+                    <div class="score-stepper">
+                      <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|-1" ${round.locked ? "disabled" : ""}>−</button>
+                      <span class="score-value">${value === "" ? "—" : value}</span>
+                      <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|1" ${round.locked ? "disabled" : ""}>+</button>
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -468,17 +569,21 @@ function renderScorecard(round, course, team) {
           }).join("")}
         </tbody>
       </table>
-    </article>
+    </details>
   `;
 }
 
 function renderLeaderboard() {
-  const leaderboard = calculateLeaderboard(state);
-  const clutchActive = state.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
+  const completedRounds = state.rounds.filter((round) => round.status === STATES.COMPLETE);
+  if (leaderboardRoundId !== "all" && !completedRounds.some((round) => round.id === leaderboardRoundId)) leaderboardRoundId = "all";
+  const leaderboardData = leaderboardDataThrough(leaderboardRoundId);
+  const leaderboard = calculateLeaderboardTrends(leaderboardData);
+  const clutchActive = leaderboardData.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
   const leaders = leaderboard.filter((row) => row.rank === 1);
   const leaderPoints = leaders[0]?.points ?? 0;
   const leaderNames = leaders.map((row) => row.name).join(" / ");
-  const completedCount = state.rounds.filter((round) => round.status === STATES.COMPLETE).length;
+  const completedCount = leaderboardData.rounds.filter((round) => round.status === STATES.COMPLETE).length;
+  const historyLabel = leaderboardRoundId === "all" ? "Latest standings" : `After ${state.rounds.find((round) => round.id === leaderboardRoundId)?.name || "selected round"}`;
   return h`
     <section class="leader-hero">
       <h2 class="screen-title">🏆 Golf Trip Leaderboard</h2>
@@ -486,13 +591,23 @@ function renderLeaderboard() {
       <div class="points">${leaderPoints}</div>
       <strong>${leaderNames || "No players yet"}</strong>
     </section>
+    <section class="section card history-card">
+      <label class="field"><span>Leaderboard view</span>
+        <select class="select" data-leaderboard-round>
+          <option value="all" ${leaderboardRoundId === "all" ? "selected" : ""}>Latest standings</option>
+          ${completedRounds.map((round) => `<option value="${round.id}" ${leaderboardRoundId === round.id ? "selected" : ""}>After ${escapeHtml(round.name)}</option>`).join("")}
+        </select>
+      </label>
+      <div class="tiny">${escapeHtml(historyLabel)} · movement compares against the previous completed round.</div>
+    </section>
     <section class="card" id="leaderboard-card">
       <table class="leaderboard">
-        <thead><tr><th>Rank</th><th>Player</th><th>Details</th><th>Points</th></tr></thead>
+        <thead><tr><th>Rank</th><th>Move</th><th>Player</th><th>Details</th><th>Points</th></tr></thead>
         <tbody>
           ${leaderboard.map((row) => h`
             <tr class="rank-${row.rank <= 3 ? row.rank : ""}">
               <td data-label="Rank">${row.rank}</td>
+              <td data-label="Move"><span class="trend trend-${row.trend}" aria-label="${trendLabel(row.trend)}" title="${trendLabel(row.trend)}">${trendSymbol(row)}</span></td>
               <td data-label="Player"><button class="leader-name" data-leader-player="${row.playerId}">${escapeHtml(row.name)}</button></td>
               <td data-label="Bonus">
                 <div class="leader-detail">
@@ -625,7 +740,7 @@ function renderSetup() {
     <section>
       <h2 class="screen-title">Setup</h2>
       <div class="tabs">
-        ${["players", "courses", "rounds", "backup"].map((tab) => `<button class="tab ${setupTab === tab ? "active" : ""}" data-setup-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
+        ${[{ id: "players", label: "Players" }, { id: "courses", label: "Courses" }, { id: "rounds", label: "Rounds" }, { id: "backup", label: "Settings" }].map((tab) => `<button class="tab ${setupTab === tab.id ? "active" : ""}" data-setup-tab="${tab.id}">${tab.label}</button>`).join("")}
       </div>
       ${setupTab === "players" ? renderPlayersSetup() : setupTab === "courses" ? renderCoursesSetup() : setupTab === "rounds" ? renderRoundsSetup() : renderBackupSetup()}
     </section>
@@ -679,7 +794,8 @@ function renderCoursesSetup() {
 function renderRoundsSetup() {
   return h`
     <div class="stack">
-      <button class="primary" data-add-round>Add round</button>
+      <button class="primary" data-add-round ${activePlayers().length < 2 ? "disabled" : ""}>Add round</button>
+      ${activePlayers().length < 2 ? `<div class="card warning">Add at least 2 active players before creating rounds.</div>` : ""}
       ${state.rounds.map((round) => {
         const locked = Boolean(round.locked);
         return h`
@@ -700,11 +816,12 @@ function renderRoundsSetup() {
               <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked ? "disabled" : ""} /></label>
               <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked ? "disabled" : ""} /></label>
             </div>
-            <div class="section-header"><h2>Teams</h2><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>Add team</button></div>
+            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>Add team</button></div>
+            <div class="section-header"><h2>Teams</h2><span class="tiny">${round.teams.length} teams</span></div>
             <div class="stack">
               ${round.teams.map((team, teamIndex) => h`
                 <div class="team-block">
-                  <div class="row"><strong>Team ${teamIndex + 1}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
+                  <div class="row"><strong>Team ${teamIndex + 1} · ${escapeHtml(teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
                   <div class="team-picker">
                     ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
                   </div>
@@ -741,13 +858,16 @@ function bindEvents(app) {
   app.querySelectorAll("[data-course-name]").forEach((input) => input.addEventListener("change", () => updateCourseName(input.dataset.courseName, input.value)));
   app.querySelectorAll("[data-par]").forEach((input) => input.addEventListener("change", () => updatePar(input.dataset.par, input.value)));
   app.querySelectorAll("[data-add-round]").forEach((button) => button.addEventListener("click", addRound));
+  app.querySelectorAll("[data-duplicate-round]").forEach((button) => button.addEventListener("click", () => duplicateRound(button.dataset.duplicateRound)));
   app.querySelectorAll("[data-round-name]").forEach((input) => input.addEventListener("change", () => updateRoundName(input.dataset.roundName, input.value)));
   app.querySelectorAll("[data-round-course]").forEach((select) => select.addEventListener("change", () => updateRoundCourse(select.dataset.roundCourse, select.value)));
   app.querySelectorAll("[data-round-hole]").forEach((input) => input.addEventListener("change", () => updateRoundHole(input.dataset.roundHole, input.value)));
+  app.querySelectorAll("[data-round-notes]").forEach((input) => input.addEventListener("change", () => updateRoundNotes(input.dataset.roundNotes, input.value)));
   app.querySelectorAll("[data-toggle-clutch]").forEach((button) => button.addEventListener("click", () => toggleClutch(button.dataset.toggleClutch)));
   app.querySelectorAll("[data-add-team]").forEach((button) => button.addEventListener("click", () => addTeam(button.dataset.addTeam)));
   app.querySelectorAll("[data-remove-team]").forEach((button) => button.addEventListener("click", () => removeTeam(button.dataset.removeTeam)));
   app.querySelectorAll("[data-toggle-team-player]").forEach((button) => button.addEventListener("click", () => toggleTeamPlayer(button.dataset.toggleTeamPlayer)));
+  app.querySelectorAll("[data-leaderboard-round]").forEach((select) => select.addEventListener("change", () => { leaderboardRoundId = select.value; selectedLeaderboardPlayerId = ""; render(); }));
   app.querySelectorAll("[data-export-image]").forEach((button) => button.addEventListener("click", exportLeaderboardImage));
   app.querySelectorAll("[data-leader-player]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = button.dataset.leaderPlayer; render(); }));
   app.querySelectorAll("[data-close-breakdown]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = ""; render(); }));
@@ -782,13 +902,21 @@ function updateAward(key, value) {
 }
 
 function completeRound(roundId) {
+  let completed = false;
   setState((draft) => {
     syncRoundStatus(draft, roundId, true);
+    const round = draft.rounds.find((item) => item.id === roundId);
+    completed = round?.status === STATES.COMPLETE;
   });
-  go("summary", roundId);
+  if (completed) go("summary", roundId);
 }
-
 function resetRound(roundId) {
+  if (pendingResetRoundId !== roundId) {
+    pendingResetRoundId = roundId;
+    render();
+    return;
+  }
+  pendingResetRoundId = "";
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
     if (!round || round.locked) return;
@@ -871,6 +999,7 @@ function updatePar(payload, value) {
 function addRound() {
   setState((draft) => {
     const players = activePlayers(draft);
+    if (players.length < 2) return;
     const midpoint = Math.ceil(players.length / 2);
     draft.rounds.push({
       id: uid("round"),
@@ -893,6 +1022,27 @@ function addRound() {
   });
 }
 
+function duplicateRound(roundId) {
+  setState((draft) => {
+    const source = draft.rounds.find((round) => round.id === roundId) || draft.rounds.at(-1);
+    if (!source) return;
+    const copy = cloneData(source);
+    copy.id = uid("round");
+    copy.name = `${source.name} copy`;
+    const activeIds = new Set(activePlayers(draft).map((player) => player.id));
+    copy.teams = source.teams.map((team) => {
+      const nextId = uid("team");
+      return { id: nextId, playerIds: team.playerIds.filter((id) => activeIds.has(id)) };
+    }).filter((team) => team.playerIds.length > 0);
+    copy.scoresByHole = {};
+    copy.awards = { longestDrivePlayerId: "", nearestPinPlayerId: "" };
+    copy.status = STATES.NOT_STARTED;
+    copy.locked = false;
+    copy.updatedAt = todayIso();
+    draft.rounds.push(copy);
+  });
+}
+
 function updateRoundName(roundId, name) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
@@ -906,6 +1056,16 @@ function updateRoundCourse(roundId, courseId) {
     if (round && !round.locked) {
       round.courseId = courseId;
       syncRoundStatus(draft, roundId);
+    }
+  });
+}
+
+function updateRoundNotes(roundId, value) {
+  setState((draft) => {
+    const round = draft.rounds.find((item) => item.id === roundId);
+    if (round && !round.locked) {
+      round.notes = value;
+      round.updatedAt = todayIso();
     }
   });
 }
@@ -943,6 +1103,7 @@ function removeTeam(payload) {
     if (!round || round.locked) return;
     round.teams = round.teams.filter((team) => team.id !== teamId);
     delete round.scoresByHole[teamId];
+    cleanRoundAwards(round);
     syncRoundStatus(draft, roundId);
   });
 }
@@ -957,6 +1118,7 @@ function toggleTeamPlayer(payload) {
     });
     const team = round.teams.find((item) => item.id === teamId);
     if (team) team.playerIds.push(playerId);
+    cleanRoundAwards(round);
     syncRoundStatus(draft, roundId);
   });
 }
@@ -1002,9 +1164,13 @@ function importBackup(event) {
 }
 
 function exportLeaderboardImage() {
-  const leaderboard = calculateLeaderboard(state);
-  const clutchActive = state.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
+  const leaderboardData = leaderboardDataThrough(leaderboardRoundId);
+  const leaderboard = calculateLeaderboardTrends(leaderboardData);
+  const clutchActive = leaderboardData.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
   const leaders = leaderboard.filter((row) => row.rank === 1);
+  const completedRounds = leaderboardData.rounds.filter((round) => round.status === STATES.COMPLETE);
+  const selectedRound = leaderboardRoundId === "all" ? null : state.rounds.find((round) => round.id === leaderboardRoundId);
+  const exportLabel = selectedRound ? "After " + selectedRound.name : "Latest standings";
   const width = 1080;
   const rowHeight = 92;
   const topHeight = 240;
@@ -1043,7 +1209,7 @@ function exportLeaderboardImage() {
   ctx.fillText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width / 2, 148);
   ctx.font = "600 22px system-ui";
   ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
-  ctx.fillText(`${state.rounds.filter((round) => round.status === STATES.COMPLETE).length} completed rounds`, width / 2, 178);
+  ctx.fillText(exportLabel + " · " + completedRounds.length + " completed round" + (completedRounds.length === 1 ? "" : "s"), width / 2, 178);
 
   leaderboard.forEach((row, index) => {
     const y = topHeight + index * rowHeight;
@@ -1058,16 +1224,20 @@ function exportLeaderboardImage() {
     ctx.textAlign = "center";
     ctx.fillText(String(row.rank), x + 42, y + 46);
 
+    ctx.fillStyle = row.trend === "up" ? "#19754f" : row.trend === "down" ? "#b84b42" : "#9a6700";
+    ctx.font = "900 24px system-ui";
+    ctx.fillText(trendSymbol(row), x + 96, y + 46);
+
     ctx.textAlign = "left";
     ctx.fillStyle = "#16201d";
     ctx.font = "800 30px system-ui";
-    ctx.fillText(row.name, x + 86, y + 33);
+    ctx.fillText(row.name, x + 190, y + 33);
 
     ctx.fillStyle = "#6a746f";
     ctx.font = "700 18px system-ui";
     const detail = [`LD ${row.longestDrivePoints}`, `NP ${row.nearestPinPoints}`];
     if (clutchActive) detail.push(`Clutch ${row.clutchPoints}`);
-    ctx.fillText(detail.join("   "), x + 86, y + 58);
+    ctx.fillText(detail.join("   "), x + 190, y + 58);
 
     ctx.textAlign = "right";
     ctx.fillStyle = "#16392f";
