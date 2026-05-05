@@ -14,7 +14,7 @@ const DEFAULT_POINTS = {
 };
 const GAME_MODES = {
   SCRAMBLE: { label: "Scramble", scoring: "team", totalLabel: "Strokes", higherWins: false },
-  MATCH_PLAY: { label: "Match play", scoring: "match", totalLabel: "Holes", higherWins: true },
+  MATCH_PLAY: { label: "Match play", scoring: "match", totalLabel: "Match", higherWins: true },
   STABLEFORD: { label: "Stableford", scoring: "player", totalLabel: "Points", higherWins: true },
 };
 
@@ -258,17 +258,19 @@ function matchOpponent(round, teamId) {
 
 function calculateMatchPlayResult(round, teamId, course = courseFor(round)) {
   const opponent = matchOpponent(round, teamId);
-  const result = { holesWon: 0, holesLost: 0, holesTied: 0, result: "—" };
+  const result = { holesWon: 0, holesLost: 0, holesTied: 0, holesPlayed: 0, result: "—" };
   if (!opponent) return result;
   course.holes.forEach((hole) => {
     const score = Number(round.scoresByHole?.[teamId]?.[hole.holeNumber]);
     const opponentScore = Number(round.scoresByHole?.[opponent.id]?.[hole.holeNumber]);
     if (!Number.isFinite(score) || !Number.isFinite(opponentScore)) return;
+    result.holesPlayed += 1;
     if (score < opponentScore) result.holesWon += 1;
     else if (score > opponentScore) result.holesLost += 1;
     else result.holesTied += 1;
   });
-  if (result.holesWon > result.holesLost) result.result = "Win";
+  if (result.holesPlayed === 0) result.result = "—";
+  else if (result.holesWon > result.holesLost) result.result = "Win";
   else if (result.holesWon < result.holesLost) result.result = "Loss";
   else result.result = "Tie";
   return result;
@@ -276,7 +278,10 @@ function calculateMatchPlayResult(round, teamId, course = courseFor(round)) {
 
 function matchPlayLabel(round, teamId, course = courseFor(round)) {
   const result = calculateMatchPlayResult(round, teamId, course);
-  return result.result === "—" ? "—" : `${result.holesWon}-${result.holesLost}`;
+  if (result.result === "—") return "—";
+  const margin = result.holesWon - result.holesLost;
+  if (margin === 0) return "AS";
+  return `${Math.abs(margin)} ${margin > 0 ? "up" : "down"}`;
 }
 
 function teamHasScores(round, teamId) {
