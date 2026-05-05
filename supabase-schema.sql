@@ -340,7 +340,7 @@ create schema if not exists private;
 alter function public.is_trip_member(uuid) set schema private;
 alter function public.is_trip_admin(uuid) set schema private;
 
-grant usage on schema private to authenticated;
+grant usage on schema private to anon, authenticated;
 grant execute on function private.is_trip_member(uuid) to authenticated;
 grant execute on function private.is_trip_admin(uuid) to authenticated;
 revoke all on function private.is_trip_member(uuid) from anon;
@@ -739,6 +739,7 @@ $$;
 
 revoke all on function private.can_create_first_trip() from public;
 revoke all on function public.can_create_first_trip() from public;
+grant execute on function private.can_create_first_trip() to authenticated;
 grant execute on function public.can_create_first_trip() to authenticated;
 
 create or replace function private.verify_guest_player_pin(invite_code_input text, player_id_input uuid, player_pin_input text)
@@ -779,6 +780,7 @@ $$;
 
 revoke all on function private.verify_guest_player_pin(text, uuid, text) from public;
 revoke all on function public.verify_guest_player_pin(text, uuid, text) from public;
+grant execute on function private.verify_guest_player_pin(text, uuid, text) to anon, authenticated;
 grant execute on function public.verify_guest_player_pin(text, uuid, text) to anon, authenticated;
 
 create or replace function private.trip_snapshot_by_invite(invite_code_input text)
