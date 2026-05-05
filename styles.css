@@ -223,6 +223,22 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   min-width: 88px;
   padding: 8px 10px;
 }
+.me-badge {
+  min-width: 88px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--mint);
+  color: var(--green);
+  font-size: 0.82rem;
+  font-weight: 950;
+}
+.me-placeholder {
+  min-width: 88px;
+  display: block;
+}
 .role-control {
   display: grid;
   gap: 4px;

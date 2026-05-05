@@ -1128,7 +1128,11 @@ function renderPlayersAdmin() {
               <span>PIN</span>
               <input data-player-pin="${player.id}" value="${escapeHtml(player.pin)}" inputmode="numeric" aria-label="Access PIN for ${escapeHtml(player.name)}" placeholder="1234" />
             </label>
-            <button class="secondary mini-action" data-link-me="${player.id}" ${linkedPlayerId === player.id ? "disabled" : ""}>${linkedPlayerId === player.id ? "Me" : "This is me"}</button>
+            ${linkedPlayerId === player.id
+              ? `<span class="me-badge">Me</span>`
+              : linkedPlayerId
+                ? `<span class="me-placeholder"></span>`
+                : `<button class="secondary mini-action" data-link-me="${player.id}">This is me</button>`}
             <button class="danger-btn ${pendingDeletePlayerId === player.id ? "confirming" : ""}" data-remove-player="${player.id}">${playerDeleteLabel(player.id)}</button>
           </div>
         `).join("") || `<div class="empty">No players yet.</div>`}
