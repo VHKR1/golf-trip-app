@@ -399,6 +399,7 @@ class SupabaseDatabaseAdapter {
     if (!trip) return;
 
     await this.upsertRows("trips", [{ id: trip.id, name: trip.name, invite_code: trip.inviteCode, created_by: trip.createdBy || user.id, created_at: trip.createdAt || nowIso() }]);
+    await this.upsertRows("trip_memberships", nextDb.memberships.filter((item) => item.tripId === trip.id).map((item) => ({ id: item.id, trip_id: item.tripId, user_id: item.userId, role: item.role, player_id: item.playerId || null })));
     await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
     await this.upsertRows("courses", nextDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
     await this.upsertRows("course_holes", nextDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
@@ -915,10 +916,20 @@ function renderAccessAdmin() {
   const rows = tripPlayers().map((player) => {
     const membership = db.memberships.find((item) => item.tripId === trip.id && item.playerId === player.id);
     const user = membership ? db.users.find((item) => item.id === membership.userId) : null;
+    const canChangeRole = membership && membership.role !== ROLES.OWNER && membership.userId !== currentUser().id;
     return h`
-      <div class="list-row">
-        <strong>${escapeHtml(player.name)}</strong>
-        <span>${user ? escapeHtml(user.email) : "Not claimed"} · ${membership?.role || "invite pending"}</span>
+      <div class="list-row access-row">
+        <div>
+          <strong>${escapeHtml(player.name)}</strong>
+          <span>${user ? escapeHtml(user.email) : "Not claimed"}</span>
+        </div>
+        ${membership
+          ? `<label class="role-control"><span>Role</span><select data-member-role="${membership.id}" ${canChangeRole ? "" : "disabled"}>
+              <option value="${ROLES.PLAYER}" ${membership.role === ROLES.PLAYER ? "selected" : ""}>Player</option>
+              <option value="${ROLES.ADMIN}" ${membership.role === ROLES.ADMIN ? "selected" : ""}>Admin</option>
+              ${membership.role === ROLES.OWNER ? `<option value="${ROLES.OWNER}" selected>Owner</option>` : ""}
+            </select></label>`
+          : `<span>Invite pending</span>`}
       </div>
     `;
   }).join("");
@@ -1204,6 +1215,7 @@ function bindEvents(app) {
   app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
   app.querySelectorAll("[data-add-course]").forEach((form) => form.addEventListener("submit", addCourse));
   app.querySelectorAll("[data-update-invite-code]").forEach((form) => form.addEventListener("submit", updateInviteCode));
+  app.querySelectorAll("[data-member-role]").forEach((select) => select.addEventListener("change", () => setMembershipRole(select.dataset.memberRole, select.value)));
   app.querySelectorAll("[data-course-name]").forEach((input) => input.addEventListener("change", () => updateCourseName(input.dataset.courseName, input.value)));
   app.querySelectorAll("[data-course-hole]").forEach((input) => input.addEventListener("change", () => updateCourseHole(input.dataset.courseHole, input.value)));
   app.querySelectorAll("[data-score]").forEach((button) => button.addEventListener("click", () => changeScore(button.dataset.score)));
@@ -1351,6 +1363,19 @@ function updateInviteCode(event) {
     if (trip) trip.inviteCode = inviteCode;
     notice = "Invite code updated.";
   }, "Updated invite code");
+}
+
+function setMembershipRole(membershipId, role) {
+  if (![ROLES.ADMIN, ROLES.PLAYER].includes(role)) return;
+  mutate((next) => {
+    const membership = next.memberships.find((item) => item.id === membershipId && item.tripId === next.session.tripId);
+    if (!membership || membership.role === ROLES.OWNER || membership.userId === next.session.userId) {
+      notice = "Owner role cannot be changed here.";
+      return;
+    }
+    membership.role = role;
+    notice = `${playerName(membership.playerId)} is now ${role === ROLES.ADMIN ? "an admin" : "a player"}.`;
+  }, "Changed member role");
 }
 
 function addPlayer(event) {
