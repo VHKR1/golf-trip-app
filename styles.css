@@ -81,7 +81,12 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .auth-card h1, .auth-card p { margin: 0; }
 .auth-card h1 { font-size: 1.7rem; line-height: 1.05; }
+.auth-card h2 { margin: 0; font-size: 1.15rem; }
 .auth-card p { color: var(--muted); font-weight: 750; }
+.secondary-auth {
+  background: #fbfaf6;
+  box-shadow: none;
+}
 
 .hero-panel {
   padding: 22px 18px;

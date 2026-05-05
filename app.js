@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
 const STORAGE_KEY = "golf-trip-pro-v1";
 const ACTIVE_TRIP_KEY = "golf-trip-pro-active-trip";
+const GUEST_ACCESS_KEY = "golf-trip-pro-guest-access";
 const SUPABASE_URL = window.GOLF_TRIP_SUPABASE_URL || "https://nyjbtllsxfovfijbpkbi.supabase.co";
 const SUPABASE_ANON_KEY = window.GOLF_TRIP_SUPABASE_ANON_KEY || "sb_publishable_alr_Hd_j_MbNxrTj9rliDw_wbkzs19F";
 const SUPABASE_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_URL.startsWith("https://"));
@@ -102,7 +103,7 @@ function normalizeDatabase(input) {
   const demo = createDemoDatabase();
   const db = input && typeof input === "object" ? input : demo;
   const allowEmpty = db.remote === true;
-  const tripId = db.session?.tripId || db.trips?.[0]?.id || demo.session.tripId;
+  const tripId = db.session?.tripId || db.trips?.[0]?.id || (allowEmpty ? "" : demo.session.tripId);
   return {
     version: 2,
     session: {
@@ -242,6 +243,27 @@ function snakeAward(row) {
   return { id: row.id, roundId: row.round_id, type: row.type, playerId: row.player_id };
 }
 
+function databaseFromSnapshot(snapshot, session = {}) {
+  const trip = snapshot?.trip;
+  if (!trip?.id) throw new Error("Trip not found.");
+  const courses = Array.isArray(snapshot.courses) ? snapshot.courses : [];
+  const holes = Array.isArray(snapshot.course_holes) ? snapshot.course_holes : [];
+  return normalizeDatabase({
+    remote: true,
+    session: { userId: session.userId || "", tripId: trip.id, view: session.view || "player", activeRoundId: snapshot.rounds?.[0]?.id || "" },
+    users: session.user ? [session.user] : [],
+    trips: [snakeTrip(trip)],
+    memberships: session.memberships || [],
+    players: (Array.isArray(snapshot.players) ? snapshot.players : []).map(snakePlayer),
+    courses: courses.map((course) => courseFromRows(course, holes)),
+    rounds: (Array.isArray(snapshot.rounds) ? snapshot.rounds : []).map(snakeRound),
+    roundEntries: (Array.isArray(snapshot.round_entries) ? snapshot.round_entries : []).map(snakeEntry),
+    roundEntryPlayers: (Array.isArray(snapshot.round_entry_players) ? snapshot.round_entry_players : []).map(snakeEntryPlayer),
+    scores: (Array.isArray(snapshot.scores) ? snapshot.scores : []).map(snakeScore),
+    awards: (Array.isArray(snapshot.awards) ? snapshot.awards : []).map(snakeAward),
+  });
+}
+
 function courseFromRows(course, holes) {
   return {
     id: course.id,
@@ -285,7 +307,7 @@ class SupabaseDatabaseAdapter {
     if (error) throw error;
   }
 
-  async ensureStarterTrip(user) {
+  async createOwnerTrip(user) {
     const tripId = crypto.randomUUID();
     const inviteCode = `GOLF-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const { error: tripError } = await this.client
@@ -318,12 +340,7 @@ class SupabaseDatabaseAdapter {
 
     let { data: memberships, error: membershipError } = await this.client.from("trip_memberships").select("*");
     if (membershipError) throw membershipError;
-    if (!memberships.length) {
-      const tripId = await this.ensureStarterTrip(user);
-      localStorage.setItem(ACTIVE_TRIP_KEY, tripId);
-      ({ data: memberships, error: membershipError } = await this.client.from("trip_memberships").select("*"));
-      if (membershipError) throw membershipError;
-    }
+    if (!memberships.length) return normalizeDatabase({ remote: true, session: { userId: user.id, tripId: "", view: "admin", activeRoundId: "" }, users: [rowUser(user)], trips: [], memberships: [], players: [], courses: [], rounds: [], roundEntries: [], roundEntryPlayers: [], scores: [], awards: [] });
 
     const activeTripId = localStorage.getItem(ACTIVE_TRIP_KEY);
     const tripId = memberships.some((item) => item.trip_id === activeTripId) ? activeTripId : memberships[0].trip_id;
@@ -387,6 +404,10 @@ class SupabaseDatabaseAdapter {
   }
 
   async saveRemote(nextDb) {
+    if (guestSession?.playerId) {
+      await this.saveGuestScorecard(nextDb, guestSession);
+      return;
+    }
     const user = await this.authUser();
     if (!user) return;
     const membership = nextDb.memberships.find((item) => item.tripId === nextDb.session.tripId && item.userId === user.id);
@@ -468,6 +489,44 @@ class SupabaseDatabaseAdapter {
     const { error } = await this.client.rpc("claim_player_profile", { player_id_input: playerId });
     if (error) throw error;
   }
+
+  async loadGuest(inviteCode, playerId = "") {
+    const { data, error } = await this.client.rpc("trip_snapshot_by_invite", { invite_code_input: inviteCode });
+    if (error) throw error;
+    return databaseFromSnapshot(data, {
+      userId: playerId ? `guest_${playerId}` : "guest",
+      user: { id: playerId ? `guest_${playerId}` : "guest", name: playerId ? "Guest player" : "Guest", email: "" },
+      memberships: playerId ? [{ id: `guest_member_${playerId}`, tripId: data.trip.id, userId: `guest_${playerId}`, role: ROLES.PLAYER, playerId }] : [],
+      view: playerId ? "player" : "leaderboard",
+    });
+  }
+
+  async saveGuestScorecard(nextDb, guest) {
+    if (!guest?.inviteCode || !guest?.playerId) return;
+    const editableEntryIds = nextDb.roundEntries
+      .filter((entry) => !entry.approvedAt && playersForEntry(entry).some((player) => player.id === guest.playerId))
+      .map((entry) => entry.id);
+    for (const entryId of editableEntryIds) {
+      const scoreRows = nextDb.scores
+        .filter((score) => score.roundEntryId === entryId)
+        .map((score) => ({ holeNumber: score.holeNumber, strokes: score.strokes }));
+      const entry = nextDb.roundEntries.find((item) => item.id === entryId);
+      const { data, error } = await this.client.rpc("save_guest_scorecard", {
+        invite_code_input: guest.inviteCode,
+        player_id_input: guest.playerId,
+        entry_id_input: entryId,
+        score_rows: scoreRows,
+        submit_input: Boolean(entry?.submittedAt),
+      });
+      if (error) throw error;
+      if (data) db = databaseFromSnapshot(data, {
+        userId: `guest_${guest.playerId}`,
+        user: { id: `guest_${guest.playerId}`, name: playerName(guest.playerId), email: "" },
+        memberships: [{ id: `guest_member_${guest.playerId}`, tripId: data.trip.id, userId: `guest_${guest.playerId}`, role: ROLES.PLAYER, playerId: guest.playerId }],
+        view: "player",
+      });
+    }
+  }
 }
 
 const supabaseClient = SUPABASE_ENABLED ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -481,6 +540,13 @@ let pendingDeleteRoundId = "";
 let authUser = null;
 let booting = SUPABASE_ENABLED;
 let authEmailSent = "";
+let guestSession = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(GUEST_ACCESS_KEY) || "null");
+  } catch {
+    return null;
+  }
+})();
 
 function persist() {
   if (!adapter.save(db)) {
@@ -506,7 +572,9 @@ function currentUser() {
 }
 
 function currentMembership() {
-  return db.memberships.find((membership) => membership.tripId === currentTrip().id && membership.userId === currentUser().id) || { role: ROLES.PLAYER, playerId: "" };
+  const trip = currentTrip();
+  if (!trip) return { role: ROLES.PLAYER, playerId: "" };
+  return db.memberships.find((membership) => membership.tripId === trip.id && membership.userId === currentUser().id) || { role: ROLES.PLAYER, playerId: "" };
 }
 
 function canAdmin() {
@@ -772,9 +840,14 @@ function render() {
     app.innerHTML = `<main class="main auth-shell"><section class="card auth-card"><h1>Golf Trip Pro</h1><p>Loading your trip...</p></section></main>`;
     return;
   }
-  if (SUPABASE_ENABLED && !authUser) {
+  if (SUPABASE_ENABLED && !authUser && !guestSession) {
     app.innerHTML = renderAuthScreen();
     bindAuthEvents(app);
+    return;
+  }
+  if (SUPABASE_ENABLED && authUser && !currentTrip()) {
+    app.innerHTML = renderOwnerSetup();
+    bindOwnerSetupEvents(app);
     return;
   }
   const trip = currentTrip();
@@ -785,8 +858,10 @@ function render() {
           <h1>Golf Trip Pro</h1>
           <p>${escapeHtml(trip.name)} · ${escapeHtml(currentMembership().role)}</p>
         </div>
-        ${SUPABASE_ENABLED
+        ${SUPABASE_ENABLED && authUser
           ? `<button class="session-action" data-sign-out>Sign out</button>`
+          : SUPABASE_ENABLED && guestSession
+            ? `<button class="session-action" data-leave-trip>Leave trip</button>`
           : `<label class="session-switch">
               <span>User</span>
               <select data-session-user>
@@ -815,9 +890,18 @@ function renderAuthScreen() {
     <main class="main auth-shell">
       <section class="card auth-card">
         <p class="eyebrow">Golf Trip Pro</p>
-        <h1>Sign in to your trip</h1>
-        <p>Use your email and we’ll send a secure magic link. No password needed.</p>
+        <h1>Player access</h1>
+        <p>Enter the trip code, choose your profile, and score only your assigned cards.</p>
         ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
+        <form class="join-form" data-guest-access>
+          <input name="inviteCode" placeholder="Trip access code" autocomplete="off" required />
+          <button class="primary">Continue</button>
+        </form>
+      </section>
+      <section class="card auth-card secondary-auth">
+        <p class="eyebrow">Owner only</p>
+        <h2>Admin sign in</h2>
+        <p>Use this only for the trip owner or admins.</p>
         ${authEmailSent ? `<section class="notice">Magic link sent to ${escapeHtml(authEmailSent)}. Open it on this device to continue.</section>` : ""}
         <form class="join-form" data-magic-link>
           <input name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
@@ -830,6 +914,27 @@ function renderAuthScreen() {
 
 function bindAuthEvents(app) {
   app.querySelectorAll("[data-magic-link]").forEach((form) => form.addEventListener("submit", sendMagicLink));
+  app.querySelectorAll("[data-guest-access]").forEach((form) => form.addEventListener("submit", guestAccess));
+}
+
+function renderOwnerSetup() {
+  return h`
+    <main class="main auth-shell">
+      <section class="card auth-card">
+        <p class="eyebrow">Owner setup</p>
+        <h1>Create the trip</h1>
+        <p>You are signed in as ${escapeHtml(authUser?.email || "owner")}. Create the shared trip once, then players join with the access code.</p>
+        ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
+        <button class="primary" data-create-owner-trip>Create shared trip</button>
+        <button class="secondary" data-sign-out>Sign out</button>
+      </section>
+    </main>
+  `;
+}
+
+function bindOwnerSetupEvents(app) {
+  app.querySelectorAll("[data-create-owner-trip]").forEach((button) => button.addEventListener("click", createOwnerTrip));
+  app.querySelectorAll("[data-sign-out]").forEach((button) => button.addEventListener("click", signOut));
 }
 
 function renderAccountAccess() {
@@ -850,8 +955,8 @@ function renderDeploymentModeNotice() {
   if (SUPABASE_ENABLED) {
     return h`
       <section class="deploy-notice live">
-        <strong>Supabase connected</strong>
-        <span>Signed in as ${escapeHtml(authUser?.email || currentUser().email || "player")}.</span>
+        <strong>${guestSession ? "Player access" : "Supabase connected"}</strong>
+        <span>${guestSession ? `Using trip code ${escapeHtml(guestSession.inviteCode)}` : `Signed in as ${escapeHtml(authUser?.email || currentUser().email || "owner")}.`}</span>
       </section>
     `;
   }
@@ -1102,6 +1207,7 @@ function renderScorecard(round, entry, options = {}) {
 
 function renderPlayerPortal() {
   const membership = currentMembership();
+  if (guestSession && !guestSession.playerId) return renderClaimProfile();
   if (!membership.id) return renderAccountAccess();
   const player = currentPlayer();
   if (!player) return renderClaimProfile();
@@ -1202,6 +1308,7 @@ function renderPlayerBreakdown(row) {
 
 function bindEvents(app) {
   app.querySelectorAll("[data-sign-out]").forEach((button) => button.addEventListener("click", signOut));
+  app.querySelectorAll("[data-leave-trip]").forEach((button) => button.addEventListener("click", leaveTrip));
   app.querySelectorAll("[data-session-user]").forEach((select) => select.addEventListener("change", () => mutate((next) => {
     next.session.userId = select.value;
     const membership = next.memberships.find((item) => item.tripId === next.session.tripId && item.userId === select.value);
@@ -1253,10 +1360,53 @@ async function signOut() {
   try {
     await adapter.signOut();
     authUser = null;
+    guestSession = null;
+    localStorage.removeItem(GUEST_ACCESS_KEY);
     notice = "Signed out.";
   } catch (error) {
     console.warn("Sign out failed.", error);
     notice = error.message || "Could not sign out.";
+  }
+  render();
+}
+
+function leaveTrip() {
+  guestSession = null;
+  localStorage.removeItem(GUEST_ACCESS_KEY);
+  db = adapter.load();
+  notice = "Trip access cleared on this device.";
+  render();
+}
+
+async function createOwnerTrip() {
+  if (!authUser || !adapter.createOwnerTrip) return;
+  try {
+    const tripId = await adapter.createOwnerTrip(authUser);
+    localStorage.setItem(ACTIVE_TRIP_KEY, tripId);
+    db = await adapter.loadRemote();
+    db.session.view = "admin";
+    scoringRoundId = db.session.activeRoundId || "";
+    notice = "Shared trip created. Add players, then share the access code.";
+  } catch (error) {
+    console.warn("Create owner trip failed.", error);
+    notice = error.message || "Could not create the trip.";
+  }
+  render();
+}
+
+async function guestAccess(event) {
+  event.preventDefault();
+  const inviteCode = String(new FormData(event.currentTarget).get("inviteCode") || "").trim().toUpperCase();
+  if (!inviteCode) return;
+  try {
+    db = await adapter.loadGuest(inviteCode);
+    guestSession = { inviteCode, playerId: "" };
+    localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
+    db.session.view = "player";
+    notice = "Trip found. Choose your player profile.";
+  } catch (error) {
+    console.warn("Guest access failed.", error);
+    notice = error.message || "Access code not found.";
   }
   render();
 }
@@ -1313,6 +1463,10 @@ function claimPlayer(event) {
   const form = event.currentTarget;
   const playerId = String(new FormData(form).get("playerId") || "");
   if (!playerId) return;
+  if (SUPABASE_ENABLED && guestSession) {
+    claimGuestPlayer(playerId);
+    return;
+  }
   if (SUPABASE_ENABLED) {
     claimPlayerRemote(playerId);
     return;
@@ -1328,6 +1482,20 @@ function claimPlayer(event) {
     membership.playerId = playerId;
     notice = "Profile claimed. Your scorecards are ready when assigned.";
   }, "Claimed player profile");
+}
+
+async function claimGuestPlayer(playerId) {
+  try {
+    guestSession = { ...guestSession, playerId };
+    localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
+    db = await adapter.loadGuest(guestSession.inviteCode, playerId);
+    db.session.view = "player";
+    notice = "Profile selected. Your scorecards are ready when assigned.";
+  } catch (error) {
+    console.warn("Guest profile failed.", error);
+    notice = error.message || "Could not select that profile.";
+  }
+  render();
 }
 
 async function claimPlayerRemote(playerId) {
@@ -1619,21 +1787,26 @@ async function initializeApp() {
   }
   try {
     authUser = await adapter.authUser();
-    if (authUser) {
+    if (!authUser && guestSession?.inviteCode) {
+      db = await adapter.loadGuest(guestSession.inviteCode, guestSession.playerId || "");
+      scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
+    } else if (authUser) {
       db = await adapter.loadRemote();
       db.session.userId = authUser.id;
       const membership = currentMembership();
-      db.session.view = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
+      db.session.view = currentTrip() && [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
       scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
     }
     supabaseClient.auth.onAuthStateChange(async (_event, session) => {
       authUser = session?.user || null;
       if (authUser) {
+        guestSession = null;
+        localStorage.removeItem(GUEST_ACCESS_KEY);
         try {
           db = await adapter.loadRemote();
           db.session.userId = authUser.id;
           const membership = currentMembership();
-          db.session.view = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
+          db.session.view = currentTrip() && [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
           scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
           notice = "Signed in.";
         } catch (error) {

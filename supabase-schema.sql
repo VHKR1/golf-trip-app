@@ -707,3 +707,142 @@ grant execute on function private.join_trip_by_invite(text) to authenticated;
 grant execute on function private.claim_player_profile(uuid) to authenticated;
 grant execute on function public.join_trip_by_invite(text) to authenticated;
 grant execute on function public.claim_player_profile(uuid) to authenticated;
+
+create or replace function private.trip_snapshot_by_invite(invite_code_input text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, private
+as $$
+declare
+  target_trip_id uuid;
+  payload jsonb;
+begin
+  select id into target_trip_id
+  from trips
+  where upper(invite_code) = upper(trim(invite_code_input))
+  limit 1;
+
+  if target_trip_id is null then
+    raise exception 'Invite code not found';
+  end if;
+
+  select jsonb_build_object(
+    'trip', to_jsonb(t),
+    'players', coalesce((select jsonb_agg(to_jsonb(p) order by p.name) from players p where p.trip_id = target_trip_id and p.active = true), '[]'::jsonb),
+    'courses', coalesce((select jsonb_agg(to_jsonb(c) order by c.name) from courses c where c.trip_id = target_trip_id), '[]'::jsonb),
+    'course_holes', coalesce((select jsonb_agg(to_jsonb(ch) order by ch.course_id, ch.hole_number) from course_holes ch join courses c on c.id = ch.course_id where c.trip_id = target_trip_id), '[]'::jsonb),
+    'rounds', coalesce((select jsonb_agg(to_jsonb(r) order by r.updated_at, r.name) from rounds r where r.trip_id = target_trip_id), '[]'::jsonb),
+    'round_entries', coalesce((select jsonb_agg(to_jsonb(re) order by re.round_id, re.position) from round_entries re join rounds r on r.id = re.round_id where r.trip_id = target_trip_id), '[]'::jsonb),
+    'round_entry_players', coalesce((select jsonb_agg(to_jsonb(rep) order by rep.round_entry_id) from round_entry_players rep join round_entries re on re.id = rep.round_entry_id join rounds r on r.id = re.round_id where r.trip_id = target_trip_id), '[]'::jsonb),
+    'scores', coalesce((select jsonb_agg(to_jsonb(s) order by s.round_entry_id, s.hole_number) from scores s join round_entries re on re.id = s.round_entry_id join rounds r on r.id = re.round_id where r.trip_id = target_trip_id), '[]'::jsonb),
+    'awards', coalesce((select jsonb_agg(to_jsonb(a) order by a.round_id, a.type) from awards a join rounds r on r.id = a.round_id where r.trip_id = target_trip_id), '[]'::jsonb)
+  ) into payload
+  from trips t
+  where t.id = target_trip_id;
+
+  return payload;
+end;
+$$;
+
+create or replace function private.save_guest_scorecard(invite_code_input text, player_id_input uuid, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, private
+as $$
+declare
+  target_trip_id uuid;
+  target_round_id uuid;
+  is_allowed boolean;
+  row_item jsonb;
+  keep_holes int[] := '{}';
+begin
+  select id into target_trip_id
+  from trips
+  where upper(invite_code) = upper(trim(invite_code_input))
+  limit 1;
+
+  if target_trip_id is null then
+    raise exception 'Invite code not found';
+  end if;
+
+  select re.round_id into target_round_id
+  from round_entries re
+  join rounds r on r.id = re.round_id
+  where re.id = entry_id_input
+    and r.trip_id = target_trip_id
+    and r.locked = false
+    and re.approved_at is null;
+
+  if target_round_id is null then
+    raise exception 'Scorecard is not editable';
+  end if;
+
+  select exists (
+    select 1
+    from round_entries re
+    join rounds r on r.id = re.round_id
+    left join round_entry_players rep on rep.round_entry_id = re.id
+    where re.id = entry_id_input
+      and r.trip_id = target_trip_id
+      and (re.scorer_player_id = player_id_input or rep.player_id = player_id_input)
+  ) into is_allowed;
+
+  if not is_allowed then
+    raise exception 'Player cannot edit this scorecard';
+  end if;
+
+  for row_item in select * from jsonb_array_elements(coalesce(score_rows, '[]'::jsonb)) loop
+    if (row_item->>'holeNumber')::int between 1 and 18 and (row_item->>'strokes')::int between 1 and 12 then
+      keep_holes := array_append(keep_holes, (row_item->>'holeNumber')::int);
+      insert into scores (round_entry_id, hole_number, strokes, updated_at)
+      values (entry_id_input, (row_item->>'holeNumber')::int, (row_item->>'strokes')::int, now())
+      on conflict (round_entry_id, hole_number)
+      do update set strokes = excluded.strokes, updated_at = now();
+    end if;
+  end loop;
+
+  delete from scores
+  where round_entry_id = entry_id_input
+    and not (hole_number = any(keep_holes));
+
+  update round_entries
+  set submitted_by = null,
+      submitted_at = case when submit_input then now() else null end,
+      approved_by = null,
+      approved_at = null
+  where id = entry_id_input;
+
+  update rounds set status = 'IN_PROGRESS', updated_at = now() where id = target_round_id and status <> 'COMPLETE';
+
+  return private.trip_snapshot_by_invite(invite_code_input);
+end;
+$$;
+
+create or replace function public.trip_snapshot_by_invite(invite_code_input text)
+returns jsonb
+language sql
+security invoker
+set search_path = public, private
+as $$
+  select private.trip_snapshot_by_invite(invite_code_input);
+$$;
+
+create or replace function public.save_guest_scorecard(invite_code_input text, player_id_input uuid, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
+returns jsonb
+language sql
+security invoker
+set search_path = public, private
+as $$
+  select private.save_guest_scorecard(invite_code_input, player_id_input, entry_id_input, score_rows, submit_input);
+$$;
+
+revoke all on function private.trip_snapshot_by_invite(text) from public;
+revoke all on function private.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) from public;
+revoke all on function public.trip_snapshot_by_invite(text) from public;
+revoke all on function public.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) from public;
+grant execute on function public.trip_snapshot_by_invite(text) to anon, authenticated;
+grant execute on function public.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) to anon, authenticated;
+grant execute on function private.trip_snapshot_by_invite(text) to anon, authenticated;
+grant execute on function private.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) to anon, authenticated;
