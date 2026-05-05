@@ -1,10 +1,24 @@
-const STORAGE_KEY = "golf-trip-scramble-v1";
-const STATES = {
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+
+const STORAGE_KEY = "golf-trip-pro-v1";
+const ACTIVE_TRIP_KEY = "golf-trip-pro-active-trip";
+const SUPABASE_URL = window.GOLF_TRIP_SUPABASE_URL || "https://nyjbtllsxfovfijbpkbi.supabase.co";
+const SUPABASE_ANON_KEY = window.GOLF_TRIP_SUPABASE_ANON_KEY || "sb_publishable_alr_Hd_j_MbNxrTj9rliDw_wbkzs19F";
+const SUPABASE_ENABLED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_URL.startsWith("https://"));
+
+const ROUND_STATES = {
   NOT_STARTED: "NOT_STARTED",
   IN_PROGRESS: "IN_PROGRESS",
   COMPLETE: "COMPLETE",
 };
-const DEFAULT_POINTS = {
+
+const ROLES = {
+  OWNER: "owner",
+  ADMIN: "admin",
+  PLAYER: "player",
+};
+
+const POINTS = {
   win: 3,
   loss: 1,
   tie: 2,
@@ -12,278 +26,622 @@ const DEFAULT_POINTS = {
   longestDrive: 1,
   nearestPin: 1,
 };
+
 const GAME_MODES = {
-  SCRAMBLE: { label: "Scramble", scoring: "team", totalLabel: "Strokes", higherWins: false },
-  MATCH_PLAY: { label: "Match play", scoring: "match", totalLabel: "Match", higherWins: true },
-  STABLEFORD: { label: "Stableford", scoring: "player", totalLabel: "Points", higherWins: true },
+  SCRAMBLE: { label: "Scramble", scoring: "team", higherWins: false, totalLabel: "Strokes" },
+  MATCH_PLAY: { label: "Match play", scoring: "match", higherWins: true, totalLabel: "Match" },
+  STABLEFORD: { label: "Stableford", scoring: "player", higherWins: true, totalLabel: "Points" },
 };
 
-const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 9)}`;
-const todayIso = () => new Date().toISOString();
+const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+const nowIso = () => new Date().toISOString();
 
-const defaultCourse = () => ({
-  id: uid("course"),
-  name: "Trip Course",
-  holes: Array.from({ length: 18 }, (_, index) => ({
-    holeNumber: index + 1,
-    par: [4, 4, 3, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5, 4, 4, 3, 5, 4][index],
-  })),
-});
+const defaultPars = [4, 4, 3, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5, 4, 4, 3, 5, 4];
 
-const starterData = () => {
-  const course = defaultCourse();
+function createDemoDatabase() {
+  const tripId = uid("trip");
+  const courseId = uid("course");
+  const adminUserId = uid("user");
+  const playerUserId = uid("user");
+  const playerIds = ["Victor", "Alex", "Sam", "Jamie", "Chris", "Taylor"].map((name) => uid(name.toLowerCase()));
+  const scrambleRoundId = uid("round");
+  const matchRoundId = uid("round");
+  const stablefordRoundId = uid("round");
+  const scrambleEntries = [uid("entry"), uid("entry")];
+  const matchEntries = playerIds.slice(0, 4).map(() => uid("entry"));
+  const stablefordEntries = playerIds.map(() => uid("entry"));
+
   return {
-    version: 1,
-    lastView: "rounds",
-    lastRoundId: "",
-    players: [],
-    courses: [course],
-    rounds: [],
+    version: 2,
+    session: { userId: adminUserId, tripId, view: "admin", activeRoundId: scrambleRoundId },
+    users: [
+      { id: adminUserId, name: "Trip Admin", email: "admin@golftrip.local" },
+      { id: playerUserId, name: "Victor Player", email: "victor@golftrip.local" },
+    ],
+    trips: [
+      { id: tripId, name: "Portugal Golf Trip", inviteCode: "ALGARVE26", createdBy: adminUserId, createdAt: nowIso() },
+    ],
+    memberships: [
+      { id: uid("member"), tripId, userId: adminUserId, role: ROLES.OWNER, playerId: "" },
+      { id: uid("member"), tripId, userId: playerUserId, role: ROLES.PLAYER, playerId: playerIds[0] },
+    ],
+    players: playerIds.map((id, index) => ({
+      id,
+      tripId,
+      name: ["Victor", "Alex", "Sam", "Jamie", "Chris", "Taylor"][index],
+      handicap: [13, 8, 18, 11, 21, 15][index],
+      active: true,
+    })),
+    courses: [
+      { id: courseId, tripId, name: "Ocean Dunes", holes: defaultPars.map((par, index) => ({ holeNumber: index + 1, par })) },
+    ],
+    rounds: [
+      { id: scrambleRoundId, tripId, courseId, name: "Day 1 Scramble", gameMode: "SCRAMBLE", clutchEnabled: true, clutchHole: 18, longestDriveHole: 9, nearestPinHole: 12, status: ROUND_STATES.NOT_STARTED, locked: false, updatedAt: nowIso() },
+      { id: matchRoundId, tripId, courseId, name: "Day 2 Match Play", gameMode: "MATCH_PLAY", clutchEnabled: true, clutchHole: 16, longestDriveHole: 8, nearestPinHole: 14, status: ROUND_STATES.NOT_STARTED, locked: false, updatedAt: nowIso() },
+      { id: stablefordRoundId, tripId, courseId, name: "Final Stableford", gameMode: "STABLEFORD", clutchEnabled: false, clutchHole: 18, longestDriveHole: 10, nearestPinHole: 17, status: ROUND_STATES.NOT_STARTED, locked: false, updatedAt: nowIso() },
+    ],
+    roundEntries: [
+      { id: scrambleEntries[0], roundId: scrambleRoundId, position: 0, scorerPlayerId: playerIds[0], submittedBy: "", submittedAt: "", approvedBy: "", approvedAt: "" },
+      { id: scrambleEntries[1], roundId: scrambleRoundId, position: 1, scorerPlayerId: playerIds[3], submittedBy: "", submittedAt: "", approvedBy: "", approvedAt: "" },
+      ...matchEntries.map((id, index) => ({ id, roundId: matchRoundId, position: index, scorerPlayerId: playerIds[index], submittedBy: "", submittedAt: "", approvedBy: "", approvedAt: "" })),
+      ...stablefordEntries.map((id, index) => ({ id, roundId: stablefordRoundId, position: index, scorerPlayerId: playerIds[index], submittedBy: "", submittedAt: "", approvedBy: "", approvedAt: "" })),
+    ],
+    roundEntryPlayers: [
+      ...playerIds.slice(0, 3).map((playerId) => ({ id: uid("entry_player"), roundEntryId: scrambleEntries[0], playerId })),
+      ...playerIds.slice(3).map((playerId) => ({ id: uid("entry_player"), roundEntryId: scrambleEntries[1], playerId })),
+      ...matchEntries.map((entryId, index) => ({ id: uid("entry_player"), roundEntryId: entryId, playerId: playerIds[index] })),
+      ...stablefordEntries.map((entryId, index) => ({ id: uid("entry_player"), roundEntryId: entryId, playerId: playerIds[index] })),
+    ],
+    scores: [],
+    awards: [],
+    auditLog: [],
   };
-};
-
-let state = loadState();
-let view = state.lastView || "rounds";
-let setupTab = "players";
-let activeRoundId = state.lastRoundId || state.rounds[0]?.id || "";
-let selectedLeaderboardPlayerId = "";
-let leaderboardRoundId = "all";
-let pendingResetRoundId = "";
-let storageWarning = "";
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return starterData();
-    const parsed = JSON.parse(raw);
-    return normalizeData(parsed);
-  } catch (error) {
-    console.warn("Restore failed, using safe defaults.", error);
-    return starterData();
-  }
 }
 
-function normalizeData(data) {
-  const clean = {
-    version: 1,
-    lastView: data.lastView || "rounds",
-    lastRoundId: data.lastRoundId || "",
-    players: Array.isArray(data.players) ? data.players : [],
-    courses: Array.isArray(data.courses) ? data.courses : [],
-    rounds: Array.isArray(data.rounds) ? data.rounds : [],
-  };
-  clean.courses = clean.courses.map((course, courseIndex) => {
-    const fallback = defaultCourse();
-    const sourceHoles = Array.isArray(course?.holes) ? course.holes : [];
-    const holes = fallback.holes.map((fallbackHole, index) => {
-      const sourceHole = sourceHoles.find((hole) => Number(hole?.holeNumber) === fallbackHole.holeNumber) || sourceHoles[index] || {};
-      return {
-        holeNumber: fallbackHole.holeNumber,
-        par: Math.max(3, Math.min(6, Number(sourceHole.par) || fallbackHole.par)),
-      };
-    });
-    return {
-      id: course?.id || uid("course"),
-      name: course?.name || `Course ${courseIndex + 1}`,
-      holes,
-    };
-  });
-  if (!clean.courses.length) clean.courses.push(defaultCourse());
-  clean.players = clean.players.map((player) => ({
-    id: player.id || uid("player"),
-    name: player.name || "Player",
-    active: player.active !== false,
-  }));
-  clean.rounds = clean.rounds.map((round) => {
-    const teams = Array.isArray(round.teams)
-      ? round.teams.map((team) => ({
-        id: team?.id || uid("team"),
-        playerIds: Array.isArray(team?.playerIds) ? team.playerIds.filter((id) => typeof id === "string") : [],
-      }))
-      : [];
-    const teamIds = new Set(teams.map((team) => team.id));
-    const scoresByHole = {};
-    if (round.scoresByHole && typeof round.scoresByHole === "object") {
-      Object.entries(round.scoresByHole).forEach(([teamId, scores]) => {
-        if (!teamIds.has(teamId) || !scores || typeof scores !== "object") return;
-        const cleanScores = {};
-        Object.entries(scores).forEach(([holeNumber, value]) => {
-          const hole = Math.max(1, Math.min(18, Number(holeNumber) || 0));
-          const score = Math.max(1, Math.min(12, Number(value) || 0));
-          if (hole && score) cleanScores[hole] = score;
-        });
-        scoresByHole[teamId] = cleanScores;
-      });
-    }
-    return {
+function normalizeDatabase(input) {
+  const demo = createDemoDatabase();
+  const db = input && typeof input === "object" ? input : demo;
+  const allowEmpty = db.remote === true;
+  const tripId = db.session?.tripId || db.trips?.[0]?.id || demo.session.tripId;
+  return {
+    version: 2,
+    session: {
+      userId: db.session?.userId || db.users?.[0]?.id || demo.session.userId,
+      tripId,
+      view: db.session?.view || "admin",
+      activeRoundId: db.session?.activeRoundId || db.rounds?.find((round) => round.tripId === tripId)?.id || "",
+    },
+    users: Array.isArray(db.users) ? db.users : demo.users,
+    trips: Array.isArray(db.trips) && (allowEmpty || db.trips.length) ? db.trips : demo.trips,
+    memberships: Array.isArray(db.memberships) ? db.memberships : demo.memberships,
+    players: Array.isArray(db.players) && (allowEmpty || db.players.length) ? db.players : demo.players,
+    courses: (Array.isArray(db.courses) && (allowEmpty || db.courses.length) ? db.courses : demo.courses).map((course) => ({
+      id: course.id || uid("course"),
+      tripId: course.tripId || tripId,
+      name: course.name || "Course",
+      holes: defaultPars.map((fallbackPar, index) => {
+        const source = Array.isArray(course.holes) ? course.holes.find((hole) => Number(hole.holeNumber) === index + 1) || course.holes[index] || {} : {};
+        return {
+          holeNumber: index + 1,
+          par: Math.max(3, Math.min(6, Number(source.par) || fallbackPar)),
+        };
+      }),
+    })),
+    rounds: Array.isArray(db.rounds) ? db.rounds.map((round) => ({
       id: round.id || uid("round"),
+      tripId: round.tripId || tripId,
+      courseId: round.courseId || db.courses?.[0]?.id || demo.courses[0].id,
       name: round.name || "Round",
-      gameMode: GAME_MODES[round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode] ? (round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode) : "SCRAMBLE",
-      courseId: round.courseId || clean.courses[0].id,
-      teams,
-      scoresByHole,
-      awards: {
-        longestDrivePlayerId: round.awards?.longestDrivePlayerId || "",
-        nearestPinPlayerId: round.awards?.nearestPinPlayerId || "",
-      },
-      clutchHole: Number(round.clutchHole) || 18,
+      gameMode: GAME_MODES[round.gameMode] ? round.gameMode : "SCRAMBLE",
       clutchEnabled: round.clutchEnabled !== false,
-      longestDriveHole: Number(round.longestDriveHole) || 9,
-      nearestPinHole: Number(round.nearestPinHole) || 12,
-      notes: round.notes || "",
-      status: Object.values(STATES).includes(round.status) ? round.status : STATES.NOT_STARTED,
+      clutchHole: Math.max(1, Math.min(18, Number(round.clutchHole) || 18)),
+      longestDriveHole: Math.max(1, Math.min(18, Number(round.longestDriveHole) || 9)),
+      nearestPinHole: Math.max(1, Math.min(18, Number(round.nearestPinHole) || 12)),
+      status: Object.values(ROUND_STATES).includes(round.status) ? round.status : ROUND_STATES.NOT_STARTED,
       locked: Boolean(round.locked),
-      updatedAt: round.updatedAt || todayIso(),
-    };
-  });
-  return clean;
+      updatedAt: round.updatedAt || nowIso(),
+    })) : demo.rounds,
+    roundEntries: Array.isArray(db.roundEntries) ? db.roundEntries.map((entry, index) => ({
+      id: entry.id || uid("entry"),
+      roundId: entry.roundId,
+      position: Number(entry.position) || index,
+      scorerPlayerId: entry.scorerPlayerId || "",
+      submittedBy: entry.submittedBy || "",
+      submittedAt: entry.submittedAt || "",
+      approvedBy: entry.approvedBy || "",
+      approvedAt: entry.approvedAt || "",
+    })) : demo.roundEntries,
+    roundEntryPlayers: Array.isArray(db.roundEntryPlayers) ? db.roundEntryPlayers.map((item) => ({ id: item.id || uid("entry_player"), roundEntryId: item.roundEntryId, playerId: item.playerId })) : demo.roundEntryPlayers,
+    scores: Array.isArray(db.scores) ? db.scores.map((score) => ({ id: score.id || uid("score"), roundEntryId: score.roundEntryId, holeNumber: Math.max(1, Math.min(18, Number(score.holeNumber) || 1)), strokes: Math.max(1, Math.min(12, Number(score.strokes) || 1)), updatedAt: score.updatedAt || nowIso() })) : [],
+    awards: Array.isArray(db.awards) ? db.awards.map((award) => ({ id: award.id || uid("award"), roundId: award.roundId, type: award.type, playerId: award.playerId || "" })) : [],
+    auditLog: Array.isArray(db.auditLog) ? db.auditLog : [],
+  };
 }
 
-function saveState() {
-  const next = { ...state, lastView: view, lastRoundId: activeRoundId };
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    storageWarning = "";
-    return true;
-  } catch (error) {
-    storageWarning = "Changes are only kept until this tab closes. Browser storage is unavailable.";
-    console.warn("Save failed.", error);
-    return false;
+class LocalDatabaseAdapter {
+  load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return normalizeDatabase(raw ? JSON.parse(raw) : createDemoDatabase());
+    } catch (error) {
+      console.warn("Database restore failed.", error);
+      return normalizeDatabase(createDemoDatabase());
+    }
+  }
+
+  save(db) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+      return true;
+    } catch (error) {
+      console.warn("Database save failed.", error);
+      return false;
+    }
   }
 }
 
-function setState(mutator) {
-  const draft = cloneData(state);
-  mutator(draft);
-  state = normalizeData(draft);
-  saveState();
+function rowUser(user) {
+  return {
+    id: user?.id || "",
+    name: user?.user_metadata?.name || user?.email?.split("@")[0] || "Signed-in player",
+    email: user?.email || "",
+  };
+}
+
+function snakeTrip(row) {
+  return { id: row.id, name: row.name, inviteCode: row.invite_code, createdBy: row.created_by || "", createdAt: row.created_at || nowIso() };
+}
+
+function snakeMembership(row) {
+  return { id: row.id, tripId: row.trip_id, userId: row.user_id, role: row.role, playerId: row.player_id || "" };
+}
+
+function snakePlayer(row) {
+  return { id: row.id, tripId: row.trip_id, name: row.name, handicap: row.handicap ?? "", active: row.active !== false };
+}
+
+function snakeRound(row) {
+  return {
+    id: row.id,
+    tripId: row.trip_id,
+    courseId: row.course_id,
+    name: row.name,
+    gameMode: row.game_mode,
+    clutchEnabled: row.clutch_enabled !== false,
+    clutchHole: row.clutch_hole,
+    longestDriveHole: row.longest_drive_hole,
+    nearestPinHole: row.nearest_pin_hole,
+    status: row.status,
+    locked: row.locked,
+    updatedAt: row.updated_at || nowIso(),
+  };
+}
+
+function snakeEntry(row) {
+  return {
+    id: row.id,
+    roundId: row.round_id,
+    position: row.position,
+    scorerPlayerId: row.scorer_player_id || "",
+    submittedBy: row.submitted_by || "",
+    submittedAt: row.submitted_at || "",
+    approvedBy: row.approved_by || "",
+    approvedAt: row.approved_at || "",
+  };
+}
+
+function snakeEntryPlayer(row) {
+  return { id: row.id, roundEntryId: row.round_entry_id, playerId: row.player_id };
+}
+
+function snakeScore(row) {
+  return { id: row.id, roundEntryId: row.round_entry_id, holeNumber: row.hole_number, strokes: row.strokes, updatedAt: row.updated_at || nowIso() };
+}
+
+function snakeAward(row) {
+  return { id: row.id, roundId: row.round_id, type: row.type, playerId: row.player_id };
+}
+
+function courseFromRows(course, holes) {
+  return {
+    id: course.id,
+    tripId: course.trip_id,
+    name: course.name,
+    holes: defaultPars.map((fallbackPar, index) => {
+      const hole = holes.find((item) => item.course_id === course.id && item.hole_number === index + 1);
+      return { holeNumber: index + 1, par: Number(hole?.par) || fallbackPar };
+    }),
+  };
+}
+
+class SupabaseDatabaseAdapter {
+  constructor(client) {
+    this.client = client;
+    this.local = new LocalDatabaseAdapter();
+    this.lastSave = Promise.resolve();
+  }
+
+  load() {
+    return this.local.load();
+  }
+
+  async authUser() {
+    const { data, error } = await this.client.auth.getUser();
+    if (error) throw error;
+    return data.user || null;
+  }
+
+  async sendMagicLink(email) {
+    const redirectTo = window.location.origin + window.location.pathname;
+    const { error } = await this.client.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: redirectTo },
+    });
+    if (error) throw error;
+  }
+
+  async signOut() {
+    const { error } = await this.client.auth.signOut();
+    if (error) throw error;
+  }
+
+  async ensureStarterTrip(user) {
+    const inviteCode = `GOLF-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const { data: trip, error: tripError } = await this.client
+      .from("trips")
+      .insert({ name: "Golf Trip", invite_code: inviteCode, created_by: user.id })
+      .select()
+      .single();
+    if (tripError) throw tripError;
+
+    const { error: membershipError } = await this.client
+      .from("trip_memberships")
+      .insert({ trip_id: trip.id, user_id: user.id, role: ROLES.OWNER });
+    if (membershipError) throw membershipError;
+
+    const { data: course, error: courseError } = await this.client
+      .from("courses")
+      .insert({ trip_id: trip.id, name: "Course" })
+      .select()
+      .single();
+    if (courseError) throw courseError;
+
+    const { error: holesError } = await this.client
+      .from("course_holes")
+      .insert(defaultPars.map((par, index) => ({ course_id: course.id, hole_number: index + 1, par })));
+    if (holesError) throw holesError;
+    return trip.id;
+  }
+
+  async loadRemote() {
+    const user = await this.authUser();
+    if (!user) return this.load();
+
+    let { data: memberships, error: membershipError } = await this.client.from("trip_memberships").select("*");
+    if (membershipError) throw membershipError;
+    if (!memberships.length) {
+      const tripId = await this.ensureStarterTrip(user);
+      localStorage.setItem(ACTIVE_TRIP_KEY, tripId);
+      ({ data: memberships, error: membershipError } = await this.client.from("trip_memberships").select("*"));
+      if (membershipError) throw membershipError;
+    }
+
+    const activeTripId = localStorage.getItem(ACTIVE_TRIP_KEY);
+    const tripId = memberships.some((item) => item.trip_id === activeTripId) ? activeTripId : memberships[0].trip_id;
+    localStorage.setItem(ACTIVE_TRIP_KEY, tripId);
+
+    const [tripsResult, allMembershipsResult, playersResult, coursesResult, roundsResult] = await Promise.all([
+      this.client.from("trips").select("*").eq("id", tripId),
+      this.client.from("trip_memberships").select("*").eq("trip_id", tripId),
+      this.client.from("players").select("*").eq("trip_id", tripId),
+      this.client.from("courses").select("*").eq("trip_id", tripId),
+      this.client.from("rounds").select("*").eq("trip_id", tripId),
+    ]);
+    [tripsResult, allMembershipsResult, playersResult, coursesResult, roundsResult].forEach((result) => {
+      if (result.error) throw result.error;
+    });
+
+    const courseIds = coursesResult.data.map((course) => course.id);
+    const roundIds = roundsResult.data.map((round) => round.id);
+    const [holesResult, entriesResult, awardsResult] = await Promise.all([
+      courseIds.length ? this.client.from("course_holes").select("*").in("course_id", courseIds) : { data: [], error: null },
+      roundIds.length ? this.client.from("round_entries").select("*").in("round_id", roundIds) : { data: [], error: null },
+      roundIds.length ? this.client.from("awards").select("*").in("round_id", roundIds) : { data: [], error: null },
+    ]);
+    [holesResult, entriesResult, awardsResult].forEach((result) => {
+      if (result.error) throw result.error;
+    });
+
+    const entryIds = entriesResult.data.map((entry) => entry.id);
+    const [entryPlayersResult, scoresResult] = await Promise.all([
+      entryIds.length ? this.client.from("round_entry_players").select("*").in("round_entry_id", entryIds) : { data: [], error: null },
+      entryIds.length ? this.client.from("scores").select("*").in("round_entry_id", entryIds) : { data: [], error: null },
+    ]);
+    [entryPlayersResult, scoresResult].forEach((result) => {
+      if (result.error) throw result.error;
+    });
+
+    return normalizeDatabase({
+      remote: true,
+      session: { userId: user.id, tripId, view: db.session?.view || "admin", activeRoundId: roundsResult.data[0]?.id || "" },
+      users: [rowUser(user)],
+      trips: tripsResult.data.map(snakeTrip),
+      memberships: allMembershipsResult.data.map(snakeMembership),
+      players: playersResult.data.map(snakePlayer),
+      courses: coursesResult.data.map((course) => courseFromRows(course, holesResult.data)),
+      rounds: roundsResult.data.map(snakeRound),
+      roundEntries: entriesResult.data.map(snakeEntry),
+      roundEntryPlayers: entryPlayersResult.data.map(snakeEntryPlayer),
+      scores: scoresResult.data.map(snakeScore),
+      awards: awardsResult.data.map(snakeAward),
+    });
+  }
+
+  save(nextDb) {
+    this.local.save(nextDb);
+    this.lastSave = this.lastSave.then(() => this.saveRemote(nextDb)).catch((error) => {
+      console.warn("Supabase save failed.", error);
+      notice = "Saved on this device, but Supabase sync failed. Check your connection.";
+      render();
+    });
+    return true;
+  }
+
+  async saveRemote(nextDb) {
+    const user = await this.authUser();
+    if (!user) return;
+    const membership = nextDb.memberships.find((item) => item.tripId === nextDb.session.tripId && item.userId === user.id);
+    const isAdmin = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role);
+    if (!isAdmin) {
+      await this.savePlayerRemote(nextDb, membership);
+      return;
+    }
+    const trip = nextDb.trips.find((item) => item.id === nextDb.session.tripId);
+    if (!trip) return;
+
+    await this.upsertRows("trips", [{ id: trip.id, name: trip.name, invite_code: trip.inviteCode, created_by: trip.createdBy || user.id, created_at: trip.createdAt || nowIso() }]);
+    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
+    await this.upsertRows("courses", nextDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
+    await this.upsertRows("course_holes", nextDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
+    const roundIds = nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => round.id);
+    await this.syncChildTable("rounds", "trip_id", [trip.id], nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => ({ id: round.id, trip_id: round.tripId, course_id: round.courseId, name: round.name, game_mode: round.gameMode, clutch_enabled: round.clutchEnabled !== false, clutch_hole: round.clutchHole, longest_drive_hole: round.longestDriveHole, nearest_pin_hole: round.nearestPinHole, status: round.status, locked: round.locked, updated_at: round.updatedAt || nowIso() })));
+    await this.syncChildTable("round_entries", "round_id", roundIds, nextDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => ({ id: entry.id, round_id: entry.roundId, position: entry.position, scorer_player_id: entry.scorerPlayerId || null, submitted_by: entry.submittedBy || null, submitted_at: entry.submittedAt || null, approved_by: entry.approvedBy || null, approved_at: entry.approvedAt || null })));
+    const entryIds = nextDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => entry.id);
+    await this.syncChildTable("round_entry_players", "round_entry_id", entryIds, nextDb.roundEntryPlayers.filter((item) => entryIds.includes(item.roundEntryId)).map((item) => ({ id: item.id, round_entry_id: item.roundEntryId, player_id: item.playerId })));
+    await this.syncChildTable("scores", "round_entry_id", entryIds, nextDb.scores.filter((score) => entryIds.includes(score.roundEntryId)).map((score) => ({ id: score.id, round_entry_id: score.roundEntryId, hole_number: score.holeNumber, strokes: score.strokes, updated_at: score.updatedAt || nowIso() })));
+    await this.syncChildTable("awards", "round_id", roundIds, nextDb.awards.filter((award) => roundIds.includes(award.roundId)).map((award) => ({ id: award.id, round_id: award.roundId, type: award.type, player_id: award.playerId })));
+  }
+
+  async savePlayerRemote(nextDb, membership) {
+    if (!membership?.playerId) return;
+    const editableEntryIds = nextDb.roundEntries
+      .filter((entry) => entry.scorerPlayerId === membership.playerId && !entry.approvedAt)
+      .map((entry) => entry.id);
+    if (!editableEntryIds.length) return;
+    await this.upsertRows("round_entries", nextDb.roundEntries.filter((entry) => editableEntryIds.includes(entry.id)).map((entry) => ({
+      id: entry.id,
+      round_id: entry.roundId,
+      position: entry.position,
+      scorer_player_id: entry.scorerPlayerId || null,
+      submitted_by: entry.submittedBy || null,
+      submitted_at: entry.submittedAt || null,
+      approved_by: entry.approvedBy || null,
+      approved_at: entry.approvedAt || null,
+    })));
+    await this.syncChildTable("scores", "round_entry_id", editableEntryIds, nextDb.scores.filter((score) => editableEntryIds.includes(score.roundEntryId)).map((score) => ({
+      id: score.id,
+      round_entry_id: score.roundEntryId,
+      hole_number: score.holeNumber,
+      strokes: score.strokes,
+      updated_at: score.updatedAt || nowIso(),
+    })));
+  }
+
+  async upsertRows(table, rows, onConflict = "id") {
+    if (!rows.length) return;
+    const { error } = await this.client.from(table).upsert(rows, { onConflict });
+    if (error) throw error;
+  }
+
+  async syncChildTable(table, parentColumn, parentIds, rows) {
+    if (!parentIds.length) return;
+    const { data: existing, error: selectError } = await this.client.from(table).select("id").in(parentColumn, parentIds);
+    if (selectError) throw selectError;
+    const keep = new Set(rows.map((row) => row.id).filter(Boolean));
+    const removeIds = existing.map((row) => row.id).filter((id) => !keep.has(id));
+    if (removeIds.length) {
+      const { error: deleteError } = await this.client.from(table).delete().in("id", removeIds);
+      if (deleteError) throw deleteError;
+    }
+    await this.upsertRows(table, rows);
+  }
+
+  async joinTrip(inviteCode) {
+    const { data, error } = await this.client.rpc("join_trip_by_invite", { invite_code_input: inviteCode });
+    if (error) throw error;
+    const tripId = Array.isArray(data) ? data[0]?.trip_id : data?.trip_id;
+    if (tripId) localStorage.setItem(ACTIVE_TRIP_KEY, tripId);
+    return tripId;
+  }
+
+  async claimPlayer(playerId) {
+    const { error } = await this.client.rpc("claim_player_profile", { player_id_input: playerId });
+    if (error) throw error;
+  }
+}
+
+const supabaseClient = SUPABASE_ENABLED ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const adapter = supabaseClient ? new SupabaseDatabaseAdapter(supabaseClient) : new LocalDatabaseAdapter();
+let db = adapter.load();
+let selectedPlayerId = "";
+let scoringRoundId = db.session.activeRoundId || "";
+let notice = "";
+let adminTab = "players";
+let pendingDeleteRoundId = "";
+let authUser = null;
+let booting = SUPABASE_ENABLED;
+let authEmailSent = "";
+
+function persist() {
+  if (!adapter.save(db)) {
+    notice = "This browser is blocking storage. Changes may disappear when the tab closes.";
+  }
+}
+
+function mutate(action, audit = "") {
+  const next = normalizeDatabase(structuredClone(db));
+  action(next);
+  if (audit) next.auditLog.unshift({ id: uid("audit"), tripId: next.session.tripId, userId: next.session.userId, message: audit, createdAt: nowIso() });
+  db = normalizeDatabase(next);
+  persist();
   render();
 }
 
-function cloneData(value) {
-  if (typeof structuredClone === "function") return structuredClone(value);
-  return JSON.parse(JSON.stringify(value));
+function currentTrip() {
+  return db.trips.find((trip) => trip.id === db.session.tripId) || db.trips[0];
 }
 
-function courseFor(round) {
-  return state.courses.find((course) => course.id === round.courseId) || state.courses[0] || defaultCourse();
+function currentUser() {
+  return db.users.find((user) => user.id === db.session.userId) || db.users[0];
+}
+
+function currentMembership() {
+  return db.memberships.find((membership) => membership.tripId === currentTrip().id && membership.userId === currentUser().id) || { role: ROLES.PLAYER, playerId: "" };
+}
+
+function canAdmin() {
+  return [ROLES.OWNER, ROLES.ADMIN].includes(currentMembership().role);
+}
+
+function currentPlayer() {
+  return db.players.find((player) => player.id === currentMembership().playerId) || null;
 }
 
 function playerName(playerId) {
-  return state.players.find((player) => player.id === playerId)?.name || "Unknown";
+  return db.players.find((player) => player.id === playerId)?.name || "Unassigned";
 }
 
-function gameModeFor(round) {
-  return GAME_MODES[round?.gameMode] || GAME_MODES.SCRAMBLE;
+function entryPlayerIds(entry) {
+  return db.roundEntryPlayers.filter((item) => item.roundEntryId === entry.id).map((item) => item.playerId);
 }
 
-function isIndividualMode(round) {
-  return ["player", "match"].includes(gameModeFor(round).scoring);
+function playerCanEditEntry(round, entry, playerId = currentMembership().playerId) {
+  if (!playerId || round.locked || entry.approvedAt) return false;
+  if (canAdmin()) return true;
+  const ids = entryPlayerIds(entry);
+  if (round.gameMode === "SCRAMBLE") return entry.scorerPlayerId === playerId;
+  return ids.includes(playerId) || entry.scorerPlayerId === playerId;
 }
 
-function isMatchPlay(round) {
-  return gameModeFor(round).scoring === "match";
-}
-
-function teamLabel(team, round = null) {
-  if (round && isIndividualMode(round)) return playerName(team.playerIds[0]) || "Empty player";
-  return team.playerIds.map(playerName).join(" / ") || "Empty team";
-}
-
-function teamShortLabel(team) {
-  const names = team.playerIds.map(playerName).filter((name) => name !== "Unknown");
-  if (!names.length) return "Empty";
-  return names.map((name) => name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()).join(" / ");
-}
-
-function nextActionRound() {
-  return state.rounds.find((round) => round.status === STATES.IN_PROGRESS)
-    || state.rounds.find((round) => round.status === STATES.NOT_STARTED)
-    || state.rounds[0];
-}
-
-function activePlayers(data = state) {
-  return data.players.filter((player) => player.active);
+function entryReviewState(entry) {
+  if (entry.approvedAt) return "Approved";
+  if (entry.submittedAt) return "Submitted";
+  return "Open";
 }
 
 function roundHasSourceData(round) {
-  const hasScores = Object.values(round.scoresByHole || {}).some((scores) => Object.keys(scores || {}).length > 0);
-  return hasScores || Boolean(round.awards.longestDrivePlayerId || round.awards.nearestPinPlayerId) || round.status !== STATES.NOT_STARTED;
+  const entryIds = entriesFor(round).map((entry) => entry.id);
+  const hasScores = db.scores.some((score) => entryIds.includes(score.roundEntryId));
+  const hasSubmitted = entriesFor(round).some((entry) => entry.submittedAt || entry.approvedAt);
+  const hasAwards = db.awards.some((award) => award.roundId === round.id);
+  return hasScores || hasSubmitted || hasAwards || round.status !== ROUND_STATES.NOT_STARTED;
 }
 
-function playerIsUsed(playerId, data = state) {
-  return data.rounds.some((round) => {
-    if (!roundHasSourceData(round)) return false;
-    const onTeam = round.teams.some((team) => team.playerIds.includes(playerId));
-    const hasAward = round.awards.longestDrivePlayerId === playerId || round.awards.nearestPinPlayerId === playerId;
-    return onTeam || hasAward;
+function roundDeleteLabel(round) {
+  if (round.locked) return "Locked";
+  if (pendingDeleteRoundId === round.id) return "Confirm";
+  return "Remove";
+}
+
+function courseHasSourceData(courseId) {
+  return tripRounds().some((round) => round.courseId === courseId && roundHasSourceData(round));
+}
+
+function tripPlayers(tripId = currentTrip().id) {
+  return db.players.filter((player) => player.tripId === tripId && player.active);
+}
+
+function tripRounds(tripId = currentTrip().id) {
+  return db.rounds.filter((round) => round.tripId === tripId);
+}
+
+function tripCourses(tripId = currentTrip().id) {
+  return db.courses.filter((course) => course.tripId === tripId);
+}
+
+function courseFor(round) {
+  return db.courses.find((course) => course.id === round.courseId) || db.courses[0];
+}
+
+function entriesFor(round) {
+  return db.roundEntries
+    .filter((entry) => entry.roundId === round.id)
+    .sort((a, b) => a.position - b.position);
+}
+
+function playersForEntry(entry) {
+  return entryPlayerIds(entry).map((id) => db.players.find((player) => player.id === id)).filter(Boolean);
+}
+
+function entryLabel(entry) {
+  const names = playersForEntry(entry).map((player) => player.name);
+  return names.join(" / ") || "Empty entry";
+}
+
+function scoreFor(entryId, holeNumber) {
+  return db.scores.find((score) => score.roundEntryId === entryId && score.holeNumber === holeNumber)?.strokes ?? "";
+}
+
+function entryScoreCount(round, entry) {
+  return courseFor(round).holes.filter((hole) => playersForEntry(entry).length && scoreFor(entry.id, hole.holeNumber) !== "").length;
+}
+
+function isEntryComplete(round, entry) {
+  return playersForEntry(entry).length > 0 && entryScoreCount(round, entry) === courseFor(round).holes.length;
+}
+
+function scoreCount(round) {
+  return entriesFor(round).reduce((sum, entry) => sum + entryScoreCount(round, entry), 0);
+}
+
+function expectedScoreCount(round) {
+  return entriesFor(round).length * courseFor(round).holes.length;
+}
+
+function isMatchPairingValid(round) {
+  if (round.gameMode !== "MATCH_PLAY") return true;
+  const entries = entriesFor(round);
+  return entries.length >= 2 && entries.length % 2 === 0 && entries.every((entry) => playersForEntry(entry).length === 1);
+}
+
+function entriesReadyForCompletion(round) {
+  return entriesFor(round).every((entry) => {
+    if (!isEntryComplete(round, entry)) return false;
+    return !entry.scorerPlayerId || Boolean(entry.approvedAt);
   });
 }
 
-function courseHasSourceData(courseId, data = state) {
-  return data.rounds.some((round) => round.courseId === courseId && roundHasSourceData(round));
+function isRoundComplete(round) {
+  return entriesFor(round).length >= 2
+    && isMatchPairingValid(round)
+    && scoreCount(round) === expectedScoreCount(round)
+    && entriesReadyForCompletion(round)
+    && Boolean(awardPlayer(round.id, "LONGEST_DRIVE"))
+    && Boolean(awardPlayer(round.id, "NEAREST_PIN"));
 }
 
-function teamScore(round, teamId, holeNumber) {
-  return round.scoresByHole?.[teamId]?.[holeNumber] ?? "";
+function derivedStatus(round) {
+  if (round.status === ROUND_STATES.COMPLETE && isRoundComplete(round)) return ROUND_STATES.COMPLETE;
+  if (scoreCount(round) > 0 || awardPlayer(round.id, "LONGEST_DRIVE") || awardPlayer(round.id, "NEAREST_PIN")) return ROUND_STATES.IN_PROGRESS;
+  return ROUND_STATES.NOT_STARTED;
 }
 
-function scoredHoleCount(round, course) {
-  return scoringTeams(round).reduce((count, team) => {
-    return count + course.holes.filter((hole) => team.playerIds.length > 0 && teamScore(round, team.id, hole.holeNumber) !== "").length;
-  }, 0);
+function awardPlayer(roundId, type) {
+  return db.awards.find((award) => award.roundId === roundId && award.type === type)?.playerId || "";
 }
 
-function expectedScoreCount(round, course) {
-  return scoringTeams(round).length * course.holes.length;
-}
-function playableTeams(round) {
-  return round.teams.filter((team) => team.playerIds.length > 0);
-}
-
-function scoringTeams(round) {
-  return isMatchPlay(round) ? round.teams : playableTeams(round);
-}
-
-function scoringEntityName(round) {
-  return isIndividualMode(round) ? "players" : "teams";
-}
-
-function hasValidMatchPairings(round) {
-  return !isMatchPlay(round) || (round.teams.length >= 2 && round.teams.length % 2 === 0 && round.teams.every((team) => team.playerIds.length > 0));
-}
-
-function roundPlayerIds(round) {
-  return new Set(round.teams.flatMap((team) => team.playerIds));
-}
-
-function cleanRoundAwards(round) {
-  const assigned = roundPlayerIds(round);
-  if (!assigned.has(round.awards.longestDrivePlayerId)) round.awards.longestDrivePlayerId = "";
-  if (!assigned.has(round.awards.nearestPinPlayerId)) round.awards.nearestPinPlayerId = "";
-}
-
-function isRoundComplete(round, course) {
-  const scoringGroups = playableTeams(round);
-  const hasEnoughGroups = scoringGroups.length >= 2 && hasValidMatchPairings(round);
-  const allScored = hasEnoughGroups && scoredHoleCount(round, course) === expectedScoreCount(round, course);
-  return Boolean(allScored && round.awards.longestDrivePlayerId && round.awards.nearestPinPlayerId);
-}
-
-function derivedRoundStatus(round, course) {
-  if (round.status === STATES.COMPLETE && isRoundComplete(round, course)) return STATES.COMPLETE;
-  if (scoredHoleCount(round, course) > 0 || round.awards.longestDrivePlayerId || round.awards.nearestPinPlayerId) return STATES.IN_PROGRESS;
-  return STATES.NOT_STARTED;
-}
-
-export function calculateTeamTotal(round, teamId) {
-  const scores = round.scoresByHole?.[teamId] || {};
-  return Object.values(scores).reduce((sum, value) => sum + (Number(value) || 0), 0);
-}
-
-function stablefordHolePoints(score, par) {
-  if (!Number.isFinite(score) || !Number.isFinite(par)) return 0;
-  const diff = score - par;
+function stablefordPoints(strokes, par) {
+  const diff = strokes - par;
   if (diff <= -3) return 5;
   if (diff === -2) return 4;
   if (diff === -1) return 3;
@@ -292,237 +650,107 @@ function stablefordHolePoints(score, par) {
   return 0;
 }
 
-function calculateStablefordTotal(round, teamId, course = courseFor(round)) {
-  const scores = round.scoresByHole?.[teamId] || {};
-  return course.holes.reduce((sum, hole) => sum + stablefordHolePoints(Number(scores[hole.holeNumber]), hole.par), 0);
+function entryStrokeTotal(entry) {
+  return db.scores.filter((score) => score.roundEntryId === entry.id).reduce((sum, score) => sum + score.strokes, 0);
 }
 
-function calculateScoringTotal(round, teamId, course = courseFor(round)) {
-  return round.gameMode === "STABLEFORD" ? calculateStablefordTotal(round, teamId, course) : calculateTeamTotal(round, teamId);
+function entryStablefordTotal(round, entry) {
+  return courseFor(round).holes.reduce((sum, hole) => {
+    const strokes = Number(scoreFor(entry.id, hole.holeNumber));
+    return sum + (Number.isFinite(strokes) ? stablefordPoints(strokes, hole.par) : 0);
+  }, 0);
 }
 
-function matchOpponent(round, teamId) {
-  const teams = scoringTeams(round);
-  const index = teams.findIndex((team) => team.id === teamId);
+function entryTotal(round, entry) {
+  return round.gameMode === "STABLEFORD" ? entryStablefordTotal(round, entry) : entryStrokeTotal(entry);
+}
+
+function matchOpponent(round, entryId) {
+  const entries = entriesFor(round);
+  const index = entries.findIndex((entry) => entry.id === entryId);
   if (index < 0) return null;
-  const opponent = teams[index % 2 === 0 ? index + 1 : index - 1] || null;
-  return opponent?.playerIds.length ? opponent : null;
+  return entries[index % 2 === 0 ? index + 1 : index - 1] || null;
 }
 
-function calculateMatchPlayResult(round, teamId, course = courseFor(round)) {
-  const opponent = matchOpponent(round, teamId);
-  const result = { holesWon: 0, holesLost: 0, holesTied: 0, holesPlayed: 0, result: "—" };
-  if (!opponent) return result;
-  course.holes.forEach((hole) => {
-    const score = Number(round.scoresByHole?.[teamId]?.[hole.holeNumber]);
-    const opponentScore = Number(round.scoresByHole?.[opponent.id]?.[hole.holeNumber]);
-    if (!Number.isFinite(score) || !Number.isFinite(opponentScore)) return;
-    result.holesPlayed += 1;
-    if (score < opponentScore) result.holesWon += 1;
-    else if (score > opponentScore) result.holesLost += 1;
-    else result.holesTied += 1;
+function matchResult(round, entry) {
+  const opponent = matchOpponent(round, entry.id);
+  const result = { won: 0, lost: 0, tied: 0, label: "AS", outcome: "Tie" };
+  if (!opponent) return { ...result, label: "No opponent", outcome: "Tie" };
+  courseFor(round).holes.forEach((hole) => {
+    const a = Number(scoreFor(entry.id, hole.holeNumber));
+    const b = Number(scoreFor(opponent.id, hole.holeNumber));
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+    if (a < b) result.won += 1;
+    else if (a > b) result.lost += 1;
+    else result.tied += 1;
   });
-  if (result.holesPlayed === 0) result.result = "—";
-  else if (result.holesWon > result.holesLost) result.result = "Win";
-  else if (result.holesWon < result.holesLost) result.result = "Loss";
-  else result.result = "Tie";
+  const margin = result.won - result.lost;
+  result.label = margin === 0 ? "AS" : `${Math.abs(margin)} ${margin > 0 ? "up" : "down"}`;
+  result.outcome = margin > 0 ? "Win" : margin < 0 ? "Loss" : "Tie";
   return result;
 }
 
-function matchPlayLabel(round, teamId, course = courseFor(round)) {
-  const result = calculateMatchPlayResult(round, teamId, course);
-  if (result.result === "—") return "—";
-  const margin = result.holesWon - result.holesLost;
-  if (margin === 0) return "AS";
-  return `${Math.abs(margin)} ${margin > 0 ? "up" : "down"}`;
+function roundWinnerEntryIds(round) {
+  if (round.status !== ROUND_STATES.COMPLETE) return [];
+  const entries = entriesFor(round);
+  if (round.gameMode === "MATCH_PLAY") return entries.filter((entry) => matchResult(round, entry).outcome === "Win").map((entry) => entry.id);
+  const totals = entries.map((entry) => ({ id: entry.id, total: entryTotal(round, entry) }));
+  const mode = GAME_MODES[round.gameMode];
+  const target = mode.higherWins ? Math.max(...totals.map((item) => item.total)) : Math.min(...totals.map((item) => item.total));
+  return totals.filter((item) => item.total === target).map((item) => item.id);
 }
 
-function teamHasScores(round, teamId) {
-  return Object.keys(round.scoresByHole?.[teamId] || {}).length > 0;
+function clutchWinnerEntryId(round) {
+  if (round.status !== ROUND_STATES.COMPLETE || round.clutchEnabled === false) return "";
+  const scores = entriesFor(round)
+    .map((entry) => ({ id: entry.id, score: Number(scoreFor(entry.id, round.clutchHole)) }))
+    .filter((item) => Number.isFinite(item.score));
+  if (!scores.length) return "";
+  const best = Math.min(...scores.map((item) => item.score));
+  const winners = scores.filter((item) => item.score === best);
+  return winners.length === 1 ? winners[0].id : "";
 }
 
-function displayScoringTotal(round, teamId, course = courseFor(round)) {
-  if (!teamHasScores(round, teamId)) return "—";
-  if (isMatchPlay(round)) return matchPlayLabel(round, teamId, course);
-  return calculateScoringTotal(round, teamId, course);
-}
-
-export function calculateRoundWinner(round, course = courseFor(round)) {
-  if (round.status !== STATES.COMPLETE) return [];
-  if (isMatchPlay(round)) {
-    return playableTeams(round)
-      .filter((team) => calculateMatchPlayResult(round, team.id, course).result === "Win")
-      .map((team) => team.id);
-  }
-  const mode = gameModeFor(round);
-  const totals = playableTeams(round).map((team) => ({ teamId: team.id, total: calculateScoringTotal(round, team.id, course) }));
-  if (!totals.length) return [];
-  const target = mode.higherWins ? Math.max(...totals.map((entry) => entry.total)) : Math.min(...totals.map((entry) => entry.total));
-  return totals.filter((entry) => entry.total === target).map((entry) => entry.teamId);
-}
-
-export function calculateClutchWinner(round) {
-  if (round.status !== STATES.COMPLETE || round.clutchEnabled === false) return "";
-  const hole = String(round.clutchHole);
-  const scores = playableTeams(round)
-    .map((team) => ({ teamId: team.id, score: Number(round.scoresByHole?.[team.id]?.[hole]) }))
-    .filter((entry) => Number.isFinite(entry.score));
-  const low = Math.min(...scores.map((entry) => entry.score));
-  const winners = scores.filter((entry) => entry.score === low);
-  return winners.length === 1 ? winners[0].teamId : "";
-}
-
-export function calculatePlayerPoints(round, playerId, points = DEFAULT_POINTS, course = courseFor(round)) {
-  return calculatePlayerPointBreakdown(round, playerId, points, course).total;
-}
-
-function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS, course = courseFor(round)) {
-  const empty = {
-    total: 0,
-    resultPoints: 0,
-    clutchPoints: 0,
-    longestDrivePoints: 0,
-    nearestPinPoints: 0,
-    result: "—",
-  };
-  if (round.status !== STATES.COMPLETE) return empty;
-  const playerTeam = round.teams.find((team) => team.playerIds.includes(playerId));
-  if (!playerTeam) return empty;
-  const winners = calculateRoundWinner(round, course);
-  const teamCount = playableTeams(round).length;
-  const breakdown = { ...empty };
-
-  if (isMatchPlay(round)) {
-    const match = calculateMatchPlayResult(round, playerTeam.id, course);
-    breakdown.result = match.result;
-    if (match.result === "Win") breakdown.resultPoints = points.win;
-    else if (match.result === "Tie") breakdown.resultPoints = points.tie;
-    else if (match.result === "Loss") breakdown.resultPoints = points.loss;
-  } else {
-    const tiedWin = winners.length > 1 && winners.includes(playerTeam.id);
-    if (tiedWin) {
-      breakdown.resultPoints = points.tie;
-      breakdown.result = "Tie";
-    } else if (winners.includes(playerTeam.id)) {
-      breakdown.resultPoints = points.win;
-      breakdown.result = "Win";
-    } else if (teamCount > 1) {
-      breakdown.resultPoints = points.loss;
-      breakdown.result = "Loss";
-    }
-  }
-
-  breakdown.clutchPoints = round.clutchEnabled === false ? 0 : calculateClutchWinner(round) === playerTeam.id ? points.clutch : 0;
-  breakdown.longestDrivePoints = round.awards.longestDrivePlayerId === playerId ? points.longestDrive : 0;
-  breakdown.nearestPinPoints = round.awards.nearestPinPlayerId === playerId ? points.nearestPin : 0;
-  breakdown.total = breakdown.resultPoints + breakdown.clutchPoints + breakdown.longestDrivePoints + breakdown.nearestPinPoints;
+function playerBreakdown(round, playerId) {
+  const breakdown = { roundId: round.id, roundName: round.name, mode: round.gameMode, result: "Not playing", resultPoints: 0, longestDrivePoints: 0, nearestPinPoints: 0, clutchPoints: 0, total: 0 };
+  if (round.status !== ROUND_STATES.COMPLETE) return breakdown;
+  const entry = entriesFor(round).find((item) => playersForEntry(item).some((player) => player.id === playerId));
+  if (!entry) return breakdown;
+  const winners = roundWinnerEntryIds(round);
+  const tiedWin = winners.length > 1 && winners.includes(entry.id);
+  if (round.gameMode === "MATCH_PLAY") breakdown.result = matchResult(round, entry).outcome;
+  else breakdown.result = tiedWin ? "Tie" : winners.includes(entry.id) ? "Win" : "Loss";
+  breakdown.resultPoints = breakdown.result === "Win" ? POINTS.win : breakdown.result === "Tie" ? POINTS.tie : POINTS.loss;
+  breakdown.longestDrivePoints = awardPlayer(round.id, "LONGEST_DRIVE") === playerId ? POINTS.longestDrive : 0;
+  breakdown.nearestPinPoints = awardPlayer(round.id, "NEAREST_PIN") === playerId ? POINTS.nearestPin : 0;
+  breakdown.clutchPoints = round.clutchEnabled && clutchWinnerEntryId(round) === entry.id ? POINTS.clutch : 0;
+  breakdown.total = breakdown.resultPoints + breakdown.longestDrivePoints + breakdown.nearestPinPoints + breakdown.clutchPoints;
   return breakdown;
 }
 
-export function calculateLeaderboard(data, points = DEFAULT_POINTS) {
-  const rows = data.players
-    .filter((player) => {
-      if (player.active) return true;
-      return data.rounds.some((round) => {
-        if (round.status !== STATES.COMPLETE) return false;
-        const onTeam = round.teams.some((team) => team.playerIds.includes(player.id));
-        const hasAward = round.awards.longestDrivePlayerId === player.id || round.awards.nearestPinPlayerId === player.id;
-        return onTeam || hasAward;
-      });
-    })
-    .map((player) => {
-      const completedRounds = data.rounds.filter((round) => round.status === STATES.COMPLETE);
-      const roundBreakdowns = completedRounds.map((round) => {
-        const course = data.courses.find((item) => item.id === round.courseId) || data.courses[0] || defaultCourse();
-        return {
-          roundId: round.id,
-          roundName: round.name,
-          gameMode: round.gameMode || "SCRAMBLE",
-          ...calculatePlayerPointBreakdown(round, player.id, points, course),
-        };
-      });
-      return {
-        playerId: player.id,
-        name: player.name,
-        points: roundBreakdowns.reduce((sum, round) => sum + round.total, 0),
-        roundsPlayed: roundBreakdowns.filter((round) => round.total > 0 || round.result !== "—").length,
-        wins: roundBreakdowns.filter((round) => round.result === "Win").length,
-        ties: roundBreakdowns.filter((round) => round.result === "Tie").length,
-        losses: roundBreakdowns.filter((round) => round.result === "Loss").length,
-        clutchPoints: roundBreakdowns.reduce((sum, round) => sum + round.clutchPoints, 0),
-        longestDrivePoints: roundBreakdowns.reduce((sum, round) => sum + round.longestDrivePoints, 0),
-        nearestPinPoints: roundBreakdowns.reduce((sum, round) => sum + round.nearestPinPoints, 0),
-        resultPoints: roundBreakdowns.reduce((sum, round) => sum + round.resultPoints, 0),
-        lastRoundPoints: roundBreakdowns.at(-1)?.total || 0,
-        roundBreakdowns,
-      };
-    })
-    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
-
-  let previousPoints = null;
+function leaderboard() {
+  const completed = tripRounds().filter((round) => round.status === ROUND_STATES.COMPLETE);
+  const rows = tripPlayers().map((player) => {
+    const rounds = completed.map((round) => playerBreakdown(round, player.id));
+    return {
+      playerId: player.id,
+      name: player.name,
+      points: rounds.reduce((sum, round) => sum + round.total, 0),
+      resultPoints: rounds.reduce((sum, round) => sum + round.resultPoints, 0),
+      longestDrivePoints: rounds.reduce((sum, round) => sum + round.longestDrivePoints, 0),
+      nearestPinPoints: rounds.reduce((sum, round) => sum + round.nearestPinPoints, 0),
+      clutchPoints: rounds.reduce((sum, round) => sum + round.clutchPoints, 0),
+      rounds,
+    };
+  }).sort((a, b) => b.points - a.points || a.name.localeCompare(b.name));
+  let previous = null;
   let previousRank = 0;
   return rows.map((row, index) => {
-    const rank = row.points === previousPoints ? previousRank : index + 1;
-    previousPoints = row.points;
+    const rank = row.points === previous ? previousRank : index + 1;
+    previous = row.points;
     previousRank = rank;
     return { ...row, rank };
   });
-}
-
-
-function leaderboardDataThrough(roundId) {
-  if (!roundId || roundId === "all") return state;
-  const index = state.rounds.findIndex((round) => round.id === roundId);
-  if (index < 0) return state;
-  return { ...state, rounds: state.rounds.slice(0, index + 1) };
-}
-
-function calculateLeaderboardTrends(data) {
-  const completedRounds = data.rounds.filter((round) => round.status === STATES.COMPLETE);
-  const lastCompleted = completedRounds.at(-1);
-  const currentRows = calculateLeaderboard(data);
-  if (!lastCompleted || completedRounds.length < 2) {
-    return currentRows.map((row) => ({ ...row, trend: "flat", previousRank: row.rank }));
-  }
-
-  const previousData = {
-    ...data,
-    rounds: data.rounds.filter((round) => round.id !== lastCompleted.id),
-  };
-  const previousRanks = new Map(calculateLeaderboard(previousData).map((row) => [row.playerId, row.rank]));
-
-  return currentRows.map((row) => {
-    const previousRank = previousRanks.get(row.playerId);
-    let trend = "flat";
-    const movement = previousRank ? previousRank - row.rank : 0;
-    if (movement > 0) trend = "up";
-    else if (movement < 0) trend = "down";
-    return { ...row, trend, previousRank: previousRank || row.rank };
-  });
-}
-function syncRoundStatus(draft, roundId, forceComplete = false) {
-  const round = draft.rounds.find((item) => item.id === roundId);
-  if (!round) return;
-  const course = draft.courses.find((item) => item.id === round.courseId) || draft.courses[0];
-  if (!course) return;
-  round.status = forceComplete ? STATES.COMPLETE : derivedRoundStatus(round, course);
-  if (round.status === STATES.COMPLETE && !isRoundComplete(round, course)) {
-    round.status = derivedRoundStatus(round, course);
-  }
-  round.updatedAt = todayIso();
-}
-
-function go(nextView, roundId = activeRoundId) {
-  view = nextView;
-  activeRoundId = roundId || activeRoundId;
-  selectedLeaderboardPlayerId = "";
-  pendingResetRoundId = "";
-  saveState();
-  render();
-}
-
-function h(strings, ...values) {
-  return strings.reduce((html, part, index) => html + part + (values[index] ?? ""), "");
 }
 
 function escapeHtml(value) {
@@ -534,648 +762,596 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function statusLabel(status) {
-  return {
-    [STATES.NOT_STARTED]: "⬜ Not started",
-    [STATES.IN_PROGRESS]: "🟡 In progress",
-    [STATES.COMPLETE]: "✅ Complete",
-  }[status];
+function h(strings, ...values) {
+  return strings.reduce((html, part, index) => html + part + (values[index] ?? ""), "");
 }
-
-function trendSymbol(row) {
-  if (!row || row.trend === "flat" || row.previousRank === row.rank) return "–";
-  const symbol = row.trend === "up" ? "▲" : "▼";
-  return symbol + " " + row.previousRank + "→" + row.rank;
-}
-
-function trendLabel(trend) {
-  return { up: "Moved up", down: "Moved down", flat: "No change" }[trend] || "No change";
-}
-
 
 function render() {
   const app = document.querySelector("#app");
+  if (booting) {
+    app.innerHTML = `<main class="main auth-shell"><section class="card auth-card"><h1>Golf Trip Pro</h1><p>Loading your trip...</p></section></main>`;
+    return;
+  }
+  if (SUPABASE_ENABLED && !authUser) {
+    app.innerHTML = renderAuthScreen();
+    bindAuthEvents(app);
+    return;
+  }
+  const trip = currentTrip();
   app.innerHTML = h`
     <header class="topbar">
       <div class="brand">
-        <h1>Golf Trip App</h1>
-        ${view === "leaderboard" ? `<button class="icon-btn" data-export-image aria-label="Export leaderboard image" title="Export leaderboard image">⇩</button>` : ""}
+        <div>
+          <h1>Golf Trip Pro</h1>
+          <p>${escapeHtml(trip.name)} · ${escapeHtml(currentMembership().role)}</p>
+        </div>
+        ${SUPABASE_ENABLED
+          ? `<button class="session-action" data-sign-out>Sign out</button>`
+          : `<label class="session-switch">
+              <span>User</span>
+              <select data-session-user>
+                ${db.users.map((user) => `<option value="${user.id}" ${user.id === db.session.userId ? "selected" : ""}>${escapeHtml(user.name)}</option>`).join("")}
+              </select>
+            </label>`}
       </div>
     </header>
-    <main class="main">${storageWarning ? `<section class="card warning">${escapeHtml(storageWarning)}</section>` : ""}${renderView()}</main>
+    <main class="main">
+      ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
+      ${renderDeploymentModeNotice()}
+      ${renderAccountAccess()}
+      ${renderView()}
+    </main>
     <nav class="bottom-nav">
-      <button class="nav-btn ${view === "rounds" || view === "round" || view === "summary" ? "active" : ""}" data-go="rounds">Rounds</button>
-      <button class="nav-btn ${view === "leaderboard" ? "active" : ""}" data-go="leaderboard">Leaderboard</button>
-      <button class="nav-btn ${view === "setup" ? "active" : ""}" data-go="setup">Setup</button>
+      <button class="${db.session.view === "admin" ? "active" : ""}" data-view="admin" ${canAdmin() ? "" : "disabled"}>Admin</button>
+      <button class="${db.session.view === "player" ? "active" : ""}" data-view="player">Player</button>
+      <button class="${db.session.view === "leaderboard" ? "active" : ""}" data-view="leaderboard">Leaderboard</button>
     </nav>
   `;
   bindEvents(app);
 }
 
-function renderView() {
-  if (view === "leaderboard") return renderLeaderboard();
-  if (view === "setup") return renderSetup();
-  if (view === "round") return renderRound();
-  if (view === "summary") return renderRoundSummary();
-  return renderDashboard();
-}
-
-function renderDashboard() {
-  const resumeRound = nextActionRound();
-  const nextText = resumeRound
-    ? `${resumeRound.status === STATES.COMPLETE ? "Review" : "Enter scores for"} ${resumeRound.name}`
-    : "Start setup";
+function renderAuthScreen() {
   return h`
-    <section class="hero-panel">
-      <p class="tiny">Next action</p>
-      <h2 class="screen-title">${escapeHtml(nextText)}</h2>
-      <p>${resumeRound ? `${escapeHtml(courseFor(resumeRound).name)} · ${statusLabel(derivedRoundStatus(resumeRound, courseFor(resumeRound)))}` : "Add players, courses, and your first round."}</p>
-      <button class="primary" data-open-round="${resumeRound?.id || ""}">${resumeRound ? "Open round" : "Open setup"}</button>
-    </section>
-    <section class="section">
-      <div class="button-grid">
-        <button class="secondary" data-go="leaderboard">View Leaderboard</button>
-        <button class="ghost" data-go="setup">Setup</button>
-      </div>
-    </section>
-    <section class="section">
-      <div class="section-header"><h2>Rounds</h2><span class="tiny">${state.rounds.length} scheduled</span></div>
-      <div class="stack">
-        ${state.rounds.map((round) => {
-          const course = courseFor(round);
-          const status = derivedRoundStatus(round, course);
-          const completeText = `${scoredHoleCount(round, course)} / ${expectedScoreCount(round, course)} scores`;
-          return h`
-            <article class="card round-item">
-              <div class="row">
-                <div>
-                  <strong>${escapeHtml(round.name)}</strong>
-                  <div class="tiny">${escapeHtml(course.name)} · ${gameModeFor(round).label} · ${completeText}</div>
-                </div>
-                <span class="status ${status}">${statusLabel(status)}</span>
-              </div>
-              <button class="primary" data-open-round="${round.id}">Open round</button>
-            </article>
-          `;
-        }).join("") || `<div class="card">No rounds yet.</div>`}
-      </div>
-    </section>
+    <main class="main auth-shell">
+      <section class="card auth-card">
+        <p class="eyebrow">Golf Trip Pro</p>
+        <h1>Sign in to your trip</h1>
+        <p>Use your email and we’ll send a secure magic link. No password needed.</p>
+        ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
+        ${authEmailSent ? `<section class="notice">Magic link sent to ${escapeHtml(authEmailSent)}. Open it on this device to continue.</section>` : ""}
+        <form class="join-form" data-magic-link>
+          <input name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+          <button class="primary">Send magic link</button>
+        </form>
+      </section>
+    </main>
   `;
 }
-function renderRoundScoreSummary(round) {
-  const course = courseFor(round);
-  const mode = gameModeFor(round);
-  const teams = playableTeams(round).map((team) => ({ team, total: calculateScoringTotal(round, team.id, course) }));
-  const entered = scoredHoleCount(round, course);
-  const expected = expectedScoreCount(round, course);
+
+function bindAuthEvents(app) {
+  app.querySelectorAll("[data-magic-link]").forEach((form) => form.addEventListener("submit", sendMagicLink));
+}
+
+function renderAccountAccess() {
+  if (currentMembership().id) return "";
   return h`
-    <section class="section card score-summary">
-      <div class="section-header"><h2>Round totals</h2><span class="tiny">${mode.totalLabel} · ${entered} / ${expected} scores entered</span></div>
-      <div class="summary-grid">
-        ${teams.map(({ team }) => `<div><span>${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</span><strong>${displayScoringTotal(round, team.id, course)}</strong></div>`).join("")}
-      </div>
+    <section class="card access-card">
+      <div class="section-header"><h2>Join a trip</h2><span>Invite code</span></div>
+      <form class="join-form" data-join-trip>
+        ${SUPABASE_ENABLED ? "" : `<input name="name" placeholder="Your name" required /><input name="email" placeholder="Email" type="email" required />`}
+        <input name="inviteCode" placeholder="Invite code" required />
+        <button>Join</button>
+      </form>
     </section>
   `;
 }
 
-function renderRound() {
-  const round = state.rounds.find((item) => item.id === activeRoundId) || state.rounds[0];
-  if (!round) return `<section class="card">Create a round in Setup to start.</section>`;
-  const course = courseFor(round);
-  const complete = isRoundComplete(round, course);
-  const missing = [];
-  const missingScores = expectedScoreCount(round, course) - scoredHoleCount(round, course);
-  if (!complete) {
-    if (playableTeams(round).length < 2) missing.push("2 " + scoringEntityName(round) + " required");
-    if (!hasValidMatchPairings(round)) missing.push("complete match pairings");
-    if (missingScores > 0) missing.push(missingScores + " score" + (missingScores === 1 ? "" : "s"));
-    if (!round.awards.longestDrivePlayerId) missing.push("LD not selected");
-    if (!round.awards.nearestPinPlayerId) missing.push("NP not selected");
+function renderDeploymentModeNotice() {
+  if (SUPABASE_ENABLED) {
+    return h`
+      <section class="deploy-notice live">
+        <strong>Supabase connected</strong>
+        <span>Signed in as ${escapeHtml(authUser?.email || currentUser().email || "player")}.</span>
+      </section>
+    `;
   }
   return h`
-    <section class="section">
-      <div class="row wrap">
-        <div>
-          <h2 class="screen-title">${escapeHtml(round.name)}</h2>
-          <div class="muted">${escapeHtml(course.name)} · ${gameModeFor(round).label} · ${round.locked ? "Locked" : statusLabel(derivedRoundStatus(round, course))}</div>
-        </div>
-        <button class="${round.locked ? "secondary" : "ghost"}" data-toggle-lock="${round.id}">${round.locked ? "Unlock" : "Lock"}</button>
-      </div>
-    </section>
-    ${missing.length ? `<section class="section card warning">Missing ${missing.join(" · ")}.</section>` : ""}
-    ${renderRoundScoreSummary(round)}
-    <section class="section stack">
-      ${scoringTeams(round).filter((team) => team.playerIds.length > 0).map((team) => renderScorecard(round, course, team)).join("") || `<div class="card warning">Assign players in Setup before entering scores.</div>`}
-    </section>
-    <section class="section card">
-      <div class="section-header"><h2>Awards</h2><span class="tiny">Bonus points</span></div>
-      <div class="form-grid">
-        <label class="field"><span>Longest Drive · hole ${round.longestDriveHole}</span>
-          <select class="select" data-award="longestDrivePlayerId" ${round.locked ? "disabled" : ""}>
-            <option value="">Select player</option>
-            ${renderPlayerOptions(round.awards.longestDrivePlayerId, round)}
-          </select>
-        </label>
-        <label class="field"><span>Nearest Pin · hole ${round.nearestPinHole}</span>
-          <select class="select" data-award="nearestPinPlayerId" ${round.locked ? "disabled" : ""}>
-            <option value="">Select player</option>
-            ${renderPlayerOptions(round.awards.nearestPinPlayerId, round)}
-          </select>
-        </label>
-      </div>
-    </section>
-    <section class="section card">
-      <label class="field"><span>Round notes</span><textarea class="input" rows="3" data-round-notes="${round.id}" ${round.locked ? "disabled" : ""}>${escapeHtml(round.notes || "")}</textarea></label>
-    </section>
-    <section class="sticky-actions">
-      <button class="danger ${pendingResetRoundId === round.id ? "confirming" : ""}" data-reset-round="${round.id}" ${round.locked ? "disabled" : ""}>${pendingResetRoundId === round.id ? "Tap again to reset" : "Reset"}</button>
-      <button class="primary" data-complete-round="${round.id}" ${round.locked || !complete ? "disabled" : ""}>Complete Round</button>
+    <section class="deploy-notice">
+      <strong>Local demo storage</strong>
+      <span>This deploy is ready for UI testing. Real multi-device login/scoring needs Supabase Auth + database connected.</span>
     </section>
   `;
 }
 
-function renderPlayerOptions(selectedId = "", round = null) {
-  const allowedIds = round ? roundPlayerIds(round) : null;
-  return state.players
-    .filter((player) => !allowedIds || allowedIds.has(player.id) || player.id === selectedId)
-    .filter((player) => player.active || allowedIds?.has(player.id) || player.id === selectedId)
-    .map((player) => `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(player.name)}${player.active ? "" : " (inactive)"}</option>`)
-    .join("");
+function renderView() {
+  if (db.session.view === "leaderboard") return renderLeaderboard();
+  if (db.session.view === "player") return renderPlayerPortal();
+  return canAdmin() ? renderAdmin() : renderPlayerPortal();
 }
-function renderScorecard(round, course, team) {
+
+function renderAdmin() {
+  const rounds = tripRounds();
+  if (!scoringRoundId || !rounds.some((round) => round.id === scoringRoundId)) scoringRoundId = rounds[0]?.id || "";
+  const activeRound = rounds.find((round) => round.id === scoringRoundId);
+  const tabs = [
+    { id: "players", label: "Players" },
+    { id: "access", label: "Access" },
+    { id: "courses", label: "Courses" },
+    { id: "rounds", label: "Rounds" },
+  ];
   return h`
-    <details class="card scorecard" open>
-      <summary class="scorecard-head row">
-        <div>
-          <strong>${escapeHtml(teamLabel(team, round))}</strong>
-          <div class="tiny">${isMatchPlay(round) ? "vs " + escapeHtml(teamLabel(matchOpponent(round, team.id) || { playerIds: [] }, round)) : round.gameMode === "STABLEFORD" ? "Stableford points calculate from strokes" : teamShortLabel(team) + " · adjust with plus/minus"}</div>
-        </div>
-        <span class="pill">${displayScoringTotal(round, team.id, course)}</span>
-      </summary>
-      <table class="score-table">
-        <thead><tr><th>Hole</th><th>Par</th><th>Score</th></tr></thead>
-        <tbody>
-          ${course.holes.map((hole) => {
-            const value = teamScore(round, team.id, hole.holeNumber);
-            return h`
-              <tr class="${value === "" ? "missing" : ""}">
-                <td>${hole.holeNumber}</td>
-                <td>${hole.par}</td>
-                <td>
-                  <div class="score-entry">
-                    <div class="score-stepper">
-                      <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|-1" ${round.locked ? "disabled" : ""}>−</button>
-                      <span class="score-value">${value === "" ? "—" : value}</span>
-                      <button data-score-change="${round.id}|${team.id}|${hole.holeNumber}|1" ${round.locked ? "disabled" : ""}>+</button>
-                    </div>
+    <section class="hero-panel">
+      <p class="eyebrow">Admin cockpit</p>
+      <h2>${escapeHtml(currentTrip().name)}</h2>
+      <p>Invite code ${escapeHtml(currentTrip().inviteCode)} · ${tripPlayers().length} players · ${rounds.length} rounds</p>
+    </section>
+    <section class="admin-tabs">
+      ${tabs.map((tab) => `<button class="${adminTab === tab.id ? "active" : ""}" data-admin-tab="${tab.id}">${tab.label}</button>`).join("")}
+    </section>
+    ${adminTab === "players" ? renderPlayersAdmin() : ""}
+    ${adminTab === "access" ? renderAccessAdmin() : ""}
+    ${adminTab === "courses" ? renderCoursesAdmin() : ""}
+    ${adminTab === "rounds" ? `${renderRoundsAdmin()}${activeRound ? renderScoringAdmin(activeRound) : `<section class="card">Create a round to start scoring.</section>`}` : ""}
+  `;
+}
+
+function renderPlayersAdmin() {
+  return h`
+    <section class="card">
+      <div class="section-header"><h2>Players</h2><span>${tripPlayers().length} active</span></div>
+      <form class="inline-form" data-add-player>
+        <input name="name" placeholder="Player name" required />
+        <input name="handicap" placeholder="HCP" inputmode="numeric" />
+        <button>Add</button>
+      </form>
+      <div class="list">
+        ${tripPlayers().map((player) => `<div class="list-row"><strong>${escapeHtml(player.name)}</strong><span>HCP ${player.handicap || "-"}</span></div>`).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderAccessAdmin() {
+  const trip = currentTrip();
+  const rows = tripPlayers().map((player) => {
+    const membership = db.memberships.find((item) => item.tripId === trip.id && item.playerId === player.id);
+    const user = membership ? db.users.find((item) => item.id === membership.userId) : null;
+    return h`
+      <div class="list-row">
+        <strong>${escapeHtml(player.name)}</strong>
+        <span>${user ? escapeHtml(user.email) : "Not claimed"} · ${membership?.role || "invite pending"}</span>
+      </div>
+    `;
+  }).join("");
+  return h`
+    <section class="card">
+      <div class="section-header"><h2>Invites</h2><span>Code ${escapeHtml(trip.inviteCode)}</span></div>
+      <form class="inline-form access-code-form" data-update-invite-code>
+        <input name="inviteCode" value="${escapeHtml(trip.inviteCode)}" aria-label="Invite code" required />
+        <button>Update code</button>
+      </form>
+      <div class="invite-box">
+        <strong>${escapeHtml(trip.inviteCode)}</strong>
+        <span>Players use this code to claim their profile and scorecards.</span>
+      </div>
+      <div class="list">${rows}</div>
+    </section>
+  `;
+}
+
+function renderCoursesAdmin() {
+  return h`
+    <section class="card">
+      <div class="section-header"><h2>Courses</h2><span>${tripCourses().length} saved</span></div>
+      <form class="inline-form course-form" data-add-course>
+        <input name="name" placeholder="Course name" required />
+        <button>Add course</button>
+      </form>
+      <div class="list">
+        ${tripCourses().map((course) => {
+          const used = courseHasSourceData(course.id);
+          return h`
+            <article class="course-card">
+              <label class="field"><span>Course name</span><input value="${escapeHtml(course.name)}" data-course-name="${course.id}" /></label>
+              ${used ? `<div class="warning">Pars are locked because this course has recorded round data.</div>` : ""}
+              <div class="course-holes">
+                ${course.holes.map((hole) => h`
+                  <div class="course-hole">
+                    <strong>H${hole.holeNumber}</strong>
+                    <label>Par<input inputmode="numeric" value="${hole.par}" data-course-hole="${course.id}|${hole.holeNumber}|par" ${used ? "disabled" : ""} /></label>
                   </div>
-                </td>
-              </tr>
-            `;
-          }).join("")}
-        </tbody>
-      </table>
+                `).join("")}
+              </div>
+            </article>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderRoundsAdmin() {
+  return h`
+    <section class="card">
+      <div class="section-header"><h2>Rounds</h2><span>Database records</span></div>
+      <form class="inline-form" data-add-round>
+        <input name="name" placeholder="Round name" required />
+        <select name="courseId">${tripCourses().map((course) => `<option value="${course.id}">${escapeHtml(course.name)}</option>`).join("")}</select>
+        <select name="gameMode">${Object.entries(GAME_MODES).map(([id, mode]) => `<option value="${id}">${mode.label}</option>`).join("")}</select>
+        <button>Add</button>
+      </form>
+      <div class="list">
+        ${tripRounds().map((round) => {
+          const status = derivedStatus(round);
+          return h`
+            <div class="round-admin-row ${round.id === scoringRoundId ? "selected" : ""}">
+              <button class="round-row" data-scoring-round="${round.id}">
+                <span><strong>${escapeHtml(round.name)}</strong><small>${GAME_MODES[round.gameMode].label} · ${scoreCount(round)} / ${expectedScoreCount(round)} scores</small></span>
+                <em>${status.replace("_", " ")}</em>
+              </button>
+              <button class="danger-btn ${pendingDeleteRoundId === round.id ? "confirming" : ""}" data-remove-round="${round.id}" ${round.locked ? "disabled" : ""}>${roundDeleteLabel(round)}</button>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderScoringAdmin(round) {
+  const course = courseFor(round);
+  const entries = entriesFor(round);
+  return h`
+    <section class="card scoring-card">
+      <div class="section-header">
+        <div><h2>${escapeHtml(round.name)}</h2><span>${GAME_MODES[round.gameMode].label} · ${escapeHtml(course.name)}</span></div>
+        <div class="button-row">
+          <button class="secondary" data-lock-round="${round.id}">${round.locked ? "Unlock" : "Lock"}</button>
+          <button class="primary" data-complete-round="${round.id}" ${round.locked || !isRoundComplete(round) ? "disabled" : ""}>Complete</button>
+        </div>
+      </div>
+      ${!isMatchPairingValid(round) ? `<div class="warning">Complete every Match Play pairing before scoring can be completed.</div>` : ""}
+      <div class="review-strip">
+        ${entries.map((entry) => `<button class="review-pill ${entry.approvedAt ? "approved" : entry.submittedAt ? "submitted" : ""}" data-approve-entry="${round.id}|${entry.id}" ${round.locked || !entry.submittedAt || entry.approvedAt || !isEntryComplete(round, entry) ? "disabled" : ""}>${escapeHtml(entryLabel(entry))}: ${entryReviewState(entry)}</button>`).join("")}
+      </div>
+      <div class="entry-grid">
+        ${entries.map((entry) => renderEntrySetup(round, entry)).join("")}
+      </div>
+      <div class="award-grid">
+        ${renderAwardSelect(round, "LONGEST_DRIVE", `Longest Drive · hole ${round.longestDriveHole}`)}
+        ${renderAwardSelect(round, "NEAREST_PIN", `Nearest Pin · hole ${round.nearestPinHole}`)}
+      </div>
+      <div class="scorecards">
+        ${entries.filter((entry) => playersForEntry(entry).length).map((entry) => renderScorecard(round, entry)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderEntrySetup(round, entry) {
+  const players = tripPlayers();
+  const selected = playersForEntry(entry).map((player) => player.id);
+  const title = round.gameMode === "MATCH_PLAY" ? `Match ${Math.floor(entry.position / 2) + 1} · Player ${entry.position % 2 === 0 ? "A" : "B"}` : round.gameMode === "SCRAMBLE" ? `Team ${entry.position + 1}` : `Player ${entry.position + 1}`;
+  return h`
+    <div class="entry-setup">
+      <strong>${title}</strong>
+      ${round.gameMode === "SCRAMBLE"
+        ? `<div class="chip-list">${players.map((player) => `<button class="chip ${selected.includes(player.id) ? "selected" : ""}" data-toggle-entry-player="${round.id}|${entry.id}|${player.id}" ${round.locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}</div>`
+        : `<div class="slot-row"><select data-set-entry-player="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}><option value="">Select player</option>${players.map((player) => `<option value="${player.id}" ${selected.includes(player.id) ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}</select><button data-remove-entry="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}>Remove</button></div>`}
+      <label class="field"><span>Scorecard owner</span>
+        <select data-set-scorer="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}>
+          <option value="">Admin only</option>
+          ${players.filter((player) => selected.includes(player.id)).map((player) => `<option value="${player.id}" ${entry.scorerPlayerId === player.id ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}
+        </select>
+      </label>
+      <span class="review-note">${entryReviewState(entry)}${entry.scorerPlayerId ? ` · scorer ${escapeHtml(playerName(entry.scorerPlayerId))}` : " · admin scoring"}</span>
+    </div>
+  `;
+}
+
+function renderAwardSelect(round, type, label) {
+  const value = awardPlayer(round.id, type);
+  return h`
+    <label class="field"><span>${escapeHtml(label)}</span>
+      <select data-award="${round.id}|${type}" ${round.locked ? "disabled" : ""}>
+        <option value="">Select player</option>
+        ${tripPlayers().map((player) => `<option value="${player.id}" ${player.id === value ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderScorecard(round, entry, options = {}) {
+  const course = courseFor(round);
+  const total = round.gameMode === "MATCH_PLAY" ? matchResult(round, entry).label : entryTotal(round, entry);
+  const editable = options.editable ?? (canAdmin() || playerCanEditEntry(round, entry));
+  const showSubmit = options.showSubmit && editable && !entry.approvedAt;
+  const entryComplete = isEntryComplete(round, entry);
+  return h`
+    <details class="scorecard" open>
+      <summary><strong>${escapeHtml(entryLabel(entry))}</strong><span>${GAME_MODES[round.gameMode].totalLabel}: ${total} · ${entryReviewState(entry)}</span></summary>
+      <div class="hole-grid">
+        ${course.holes.map((hole) => {
+          const value = scoreFor(entry.id, hole.holeNumber);
+          return h`
+            <div class="hole-cell ${value === "" ? "missing" : ""}">
+              <span>H${hole.holeNumber} · P${hole.par}</span>
+              <div class="stepper">
+                <button data-score="${round.id}|${entry.id}|${hole.holeNumber}|-1" ${!editable ? "disabled" : ""}>-</button>
+                <strong>${value || "-"}</strong>
+                <button data-score="${round.id}|${entry.id}|${hole.holeNumber}|1" ${!editable ? "disabled" : ""}>+</button>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+      ${showSubmit ? `<div class="scorecard-actions"><button class="primary" data-submit-entry="${round.id}|${entry.id}" ${!entryComplete ? "disabled" : ""}>${entry.submittedAt ? "Resubmit scorecard" : "Submit scorecard"}</button>${entryComplete ? "" : `<span class="review-note">Score all 18 holes before submitting.</span>`}</div>` : ""}
     </details>
   `;
 }
 
+function renderPlayerPortal() {
+  const membership = currentMembership();
+  if (!membership.id) return renderAccountAccess();
+  const player = currentPlayer();
+  if (!player) return renderClaimProfile();
+  const rows = leaderboard();
+  const mine = rows.find((row) => row.playerId === player.id);
+  const editableEntries = tripRounds().flatMap((round) => entriesFor(round).filter((entry) => playerCanEditEntry(round, entry, player.id)).map((entry) => ({ round, entry })));
+  return h`
+    <section class="hero-panel">
+      <p class="eyebrow">Player view</p>
+      <h2>${escapeHtml(player.name)}</h2>
+      <p>${mine ? `Rank ${mine.rank} · ${mine.points} points` : "Your scoring portal"}</p>
+    </section>
+    <section class="card">
+      <div class="section-header"><h2>My scorecards</h2><span>${editableEntries.length} editable</span></div>
+      <div class="scorecards">
+        ${editableEntries.map(({ round, entry }) => h`
+          <div class="player-round-card">
+            <div class="section-header"><h2>${escapeHtml(round.name)}</h2><span>${GAME_MODES[round.gameMode].label}</span></div>
+            ${renderScorecard(round, entry, { editable: true, showSubmit: true })}
+          </div>
+        `).join("") || `<div class="empty">No scorecards assigned to you yet.</div>`}
+      </div>
+    </section>
+    <section class="card">
+      <div class="section-header"><h2>My rounds</h2><span>Read-only schedule</span></div>
+      <div class="list">
+        ${tripRounds().map((round) => {
+          const entry = entriesFor(round).find((item) => playersForEntry(item).some((entryPlayer) => entryPlayer.id === player.id));
+          return `<div class="list-row"><strong>${escapeHtml(round.name)}</strong><span>${entry ? escapeHtml(entryLabel(entry)) : "Not playing"} · ${derivedStatus(round).replace("_", " ")}</span></div>`;
+        }).join("")}
+      </div>
+    </section>
+    ${mine ? renderPlayerBreakdown(mine) : ""}
+  `;
+}
+
+function renderClaimProfile() {
+  const claimedIds = new Set(db.memberships.filter((membership) => membership.tripId === currentTrip().id && membership.playerId).map((membership) => membership.playerId));
+  return h`
+    <section class="card claim-card">
+      <div class="section-header"><h2>Claim your player profile</h2><span>${escapeHtml(currentTrip().name)}</span></div>
+      <form class="join-form" data-claim-player>
+        <select name="playerId" required>
+          <option value="">Choose your name</option>
+          ${tripPlayers().map((player) => `<option value="${player.id}" ${claimedIds.has(player.id) ? "disabled" : ""}>${escapeHtml(player.name)}${claimedIds.has(player.id) ? " · claimed" : ""}</option>`).join("")}
+        </select>
+        <button>Claim profile</button>
+      </form>
+    </section>
+  `;
+}
+
 function renderLeaderboard() {
-  const completedRounds = state.rounds.filter((round) => round.status === STATES.COMPLETE);
-  if (leaderboardRoundId !== "all" && !completedRounds.some((round) => round.id === leaderboardRoundId)) leaderboardRoundId = "all";
-  const leaderboardData = leaderboardDataThrough(leaderboardRoundId);
-  const leaderboard = calculateLeaderboardTrends(leaderboardData);
-  const clutchActive = leaderboardData.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
-  const leaders = leaderboard.filter((row) => row.rank === 1);
-  const leaderPoints = leaders[0]?.points ?? 0;
-  const leaderNames = leaders.map((row) => row.name).join(" / ");
-  const completedCount = leaderboardData.rounds.filter((round) => round.status === STATES.COMPLETE).length;
-  const historyLabel = leaderboardRoundId === "all" ? "Latest standings" : `After ${state.rounds.find((round) => round.id === leaderboardRoundId)?.name || "selected round"}`;
+  const rows = leaderboard();
+  const leaders = rows.filter((row) => row.rank === 1);
   return h`
     <section class="leader-hero">
-      <h2 class="screen-title">🏆 Golf Trip Leaderboard</h2>
-      <p class="muted">${completedCount} completed round${completedCount === 1 ? "" : "s"} · ${leaders.length > 1 ? "current leaders" : "current leader"}</p>
-      <div class="points">${leaderPoints}</div>
-      <strong>${leaderNames || "No players yet"}</strong>
+      <h2>Golf Trip Leaderboard</h2>
+      <div class="points">${leaders[0]?.points || 0}</div>
+      <strong>${leaders.map((row) => row.name).join(" / ") || "No leader yet"}</strong>
     </section>
-    <section class="section card history-card">
-      <label class="field"><span>Leaderboard view</span>
-        <select class="select" data-leaderboard-round>
-          <option value="all" ${leaderboardRoundId === "all" ? "selected" : ""}>Latest standings</option>
-          ${completedRounds.map((round) => `<option value="${round.id}" ${leaderboardRoundId === round.id ? "selected" : ""}>After ${escapeHtml(round.name)}</option>`).join("")}
-        </select>
-      </label>
-      <div class="tiny">${escapeHtml(historyLabel)} · movement compares against the previous completed round.</div>
-    </section>
-    <section class="card" id="leaderboard-card">
+    <section class="card">
       <table class="leaderboard">
-        <thead><tr><th>Rank</th><th>Move</th><th>Player</th><th>Details</th><th>Points</th></tr></thead>
+        <thead><tr><th>Rank</th><th>Player</th><th>Details</th><th>Points</th></tr></thead>
         <tbody>
-          ${leaderboard.map((row) => h`
+          ${rows.map((row) => h`
             <tr class="rank-${row.rank <= 3 ? row.rank : ""}">
-              <td data-label="Rank">${row.rank}</td>
-              <td data-label="Move"><span class="trend trend-${row.trend}" aria-label="${trendLabel(row.trend)}" title="${trendLabel(row.trend)}">${trendSymbol(row)}</span></td>
-              <td data-label="Player"><button class="leader-name" data-leader-player="${row.playerId}">${escapeHtml(row.name)}</button></td>
-              <td data-label="Bonus">
-                <div class="leader-detail">
-                  <span>LD ${row.longestDrivePoints}</span>
-                  <span>NP ${row.nearestPinPoints}</span>
-                  ${clutchActive ? `<span>Clutch ${row.clutchPoints}</span>` : ""}
-                </div>
-              </td>
-              <td data-label="Points">${row.points}</td>
+              <td>${row.rank}</td>
+              <td><button class="link-button" data-select-player="${row.playerId}">${escapeHtml(row.name)}</button></td>
+              <td><span>LD ${row.longestDrivePoints}</span><span>NP ${row.nearestPinPoints}</span><span>Clutch ${row.clutchPoints}</span></td>
+              <td>${row.points}</td>
             </tr>
           `).join("")}
         </tbody>
       </table>
     </section>
-    ${renderLeaderboardBreakdown(leaderboard)}
+    ${selectedPlayerId ? renderPlayerBreakdown(rows.find((row) => row.playerId === selectedPlayerId)) : ""}
   `;
 }
 
-function renderLeaderboardBreakdown(leaderboard) {
-  const selected = leaderboard.find((row) => row.playerId === selectedLeaderboardPlayerId);
-  if (!selected) return "";
+function renderPlayerBreakdown(row) {
+  if (!row) return "";
   return h`
-    <section class="section card point-breakdown">
-      <div class="row">
-        <div>
-          <h2>${escapeHtml(selected.name)}</h2>
-          <div class="tiny">${selected.points} total points</div>
-        </div>
-        <button class="ghost" data-close-breakdown>Close</button>
+    <section class="card breakdown">
+      <div class="section-header"><h2>${escapeHtml(row.name)}</h2><span>${row.points} points</span></div>
+      <div class="metric-grid">
+        <div><strong>${row.resultPoints}</strong><span>Result</span></div>
+        <div><strong>${row.longestDrivePoints}</strong><span>LD</span></div>
+        <div><strong>${row.nearestPinPoints}</strong><span>NP</span></div>
+        <div><strong>${row.clutchPoints}</strong><span>Clutch</span></div>
       </div>
-      <div class="breakdown-total-grid">
-        <div><strong>${selected.resultPoints}</strong><span>Result</span></div>
-        <div><strong>${selected.longestDrivePoints}</strong><span>LD</span></div>
-        <div><strong>${selected.nearestPinPoints}</strong><span>NP</span></div>
-        ${selected.clutchPoints > 0 ? `<div><strong>${selected.clutchPoints}</strong><span>Clutch</span></div>` : ""}
-      </div>
-      <div class="stack">
-        ${selected.roundBreakdowns.map((round) => h`
-          <article class="breakdown-round">
-            <div class="row">
-              <div><strong>${escapeHtml(round.roundName)}</strong><div class="tiny">${gameModeFor(round).label}</div></div>
-              <span class="pill">${round.total}</span>
-            </div>
-            <div class="round-points">
-              <span>${round.result}: ${round.resultPoints}</span>
-              ${round.longestDrivePoints ? `<span>LD +${round.longestDrivePoints}</span>` : ""}
-              ${round.nearestPinPoints ? `<span>NP +${round.nearestPinPoints}</span>` : ""}
-              ${round.clutchPoints ? `<span>Clutch +${round.clutchPoints}</span>` : ""}
-            </div>
-          </article>
-        `).join("") || `<div class="tiny">No completed rounds yet.</div>`}
+      <div class="list">
+        ${row.rounds.map((round) => `<div class="list-row"><strong>${escapeHtml(round.roundName)}</strong><span>${round.result} · ${round.total} pts</span></div>`).join("") || `<div class="empty">No completed rounds yet.</div>`}
       </div>
     </section>
-  `;
-}
-
-
-function renderRoundSummary() {
-  const round = state.rounds.find((item) => item.id === activeRoundId && item.status === STATES.COMPLETE) || state.rounds.find((item) => item.status === STATES.COMPLETE);
-  if (!round) return `<section class="card">Complete a round to see a summary.</section>`;
-  const course = courseFor(round);
-  const teams = playableTeams(round);
-  const winners = calculateRoundWinner(round, course);
-  const clutchTeamId = calculateClutchWinner(round);
-  const clutchTeam = teams.find((team) => team.id === clutchTeamId);
-  const playerIds = [...new Set(teams.flatMap((team) => team.playerIds))];
-  return h`
-    <section class="hero-panel summary-hero">
-      <p class="tiny">Round complete</p>
-      <h2 class="screen-title">${escapeHtml(round.name)}</h2>
-      <p>${escapeHtml(course.name)} · ${gameModeFor(round).label}</p>
-    </section>
-    <section class="section stack">
-      ${teams.map((team) => {
-        const winner = winners.includes(team.id);
-        return h`
-          <article class="card summary-team ${winner ? "summary-winner" : ""}">
-            <div class="row">
-              <div>
-                <strong>${escapeHtml(teamLabel(team, round))}</strong>
-                <div class="tiny">${winner ? "Winning " + (isIndividualMode(round) ? "player" : "team") : gameModeFor(round).totalLabel}</div>
-              </div>
-              <span class="pill">${displayScoringTotal(round, team.id, course)}</span>
-            </div>
-          </article>
-        `;
-      }).join("")}
-    </section>
-    <section class="section card point-breakdown">
-      <div class="section-header"><h2>Awards</h2><span class="tiny">Bonus points</span></div>
-      <div class="round-points">
-        <span>LD: ${escapeHtml(playerName(round.awards.longestDrivePlayerId))}</span>
-        <span>NP: ${escapeHtml(playerName(round.awards.nearestPinPlayerId))}</span>
-        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeam ? escapeHtml(teamLabel(clutchTeam, round)) : "No winner"}</span>`}
-      </div>
-    </section>
-    <section class="section card point-breakdown">
-      <div class="section-header"><h2>Points Awarded</h2><span class="tiny">This round</span></div>
-      <div class="stack">
-        ${playerIds.map((playerId) => {
-          const points = calculatePlayerPoints(round, playerId, DEFAULT_POINTS, course);
-          return `<div class="row"><strong>${escapeHtml(playerName(playerId))}</strong><span class="pill">${points}</span></div>`;
-        }).join("") || `<div class="tiny">No players assigned.</div>`}
-      </div>
-    </section>
-    <section class="section button-grid">
-      <button class="secondary" data-open-round="${round.id}">Edit Round</button>
-      <button class="primary" data-go="leaderboard">View Leaderboard</button>
-    </section>
-  `;
-}
-
-
-function renderTeamSetupBlock(round, team, teamIndex, disabled) {
-  return h`
-    <div class="team-block">
-      <div class="row">
-        <strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong>
-        <button class="ghost" data-remove-team="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>Remove</button>
-      </div>
-      <div class="team-picker">
-        ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${disabled ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
-      </div>
-    </div>
-  `;
-}
-
-function renderMatchPlayerOptions(team, round) {
-  const selectedId = team.playerIds[0] || "";
-  const assignedToOtherCard = new Set(round.teams
-    .filter((item) => item.id !== team.id)
-    .flatMap((item) => item.playerIds));
-  return [
-    `<option value="">Select player</option>`,
-    ...state.players
-      .filter((player) => player.active || player.id === selectedId)
-      .map((player) => {
-        const assigned = assignedToOtherCard.has(player.id);
-        const label = `${player.name}${player.active ? "" : " (inactive)"}${assigned ? " · currently in another match" : ""}`;
-        return `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(label)}</option>`;
-      }),
-  ].join("");
-}
-
-function renderMatchPairingsSetup(round, disabled) {
-  const pairs = [];
-  for (let index = 0; index < scoringTeams(round).length; index += 2) {
-    pairs.push(scoringTeams(round).slice(index, index + 2));
-  }
-  return h`
-    <div class="match-pair-grid">
-      ${pairs.map((pair, pairIndex) => {
-        const [first, second] = pair;
-        return h`
-          <div class="match-pair-card">
-            <div class="match-pair-head">
-              <strong>Match ${pairIndex + 1}</strong>
-              <span>${escapeHtml(teamLabel(first, round))} vs ${second ? escapeHtml(teamLabel(second, round)) : "Needs opponent"}</span>
-            </div>
-            ${pair.map((team, offset) => h`
-              <div class="match-slot">
-                <label class="field">
-                  <span>Player ${offset === 0 ? "A" : "B"}</span>
-                  <select class="select" data-set-team-player="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>
-                    ${renderMatchPlayerOptions(team, round)}
-                  </select>
-                </label>
-                <button class="ghost" data-remove-team="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>Remove</button>
-              </div>
-            `).join("")}
-            ${second ? "" : `<div class="warning setup-warning">Add one more player card to complete this match.</div>`}
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
-function renderBackupSetup() {
-  return h`
-    <div class="stack">
-      <article class="card form-grid">
-        <div>
-          <strong>Trip backup</strong>
-          <div class="tiny">Exports players, courses, rounds, scores, awards, teams, and locks. No calculated leaderboard data is stored.</div>
-        </div>
-        <button class="primary" data-export-backup>Export backup</button>
-        <label class="field"><span>Restore backup</span><input class="input" type="file" accept="application/json" data-import-backup /></label>
-      </article>
-    </div>
-  `;
-}
-
-
-function renderSetup() {
-  return h`
-    <section>
-      <h2 class="screen-title">Setup</h2>
-      <div class="tabs">
-        ${[{ id: "players", label: "Players" }, { id: "courses", label: "Courses" }, { id: "rounds", label: "Rounds" }, { id: "backup", label: "Settings" }].map((tab) => `<button class="tab ${setupTab === tab.id ? "active" : ""}" data-setup-tab="${tab.id}">${tab.label}</button>`).join("")}
-      </div>
-      ${setupTab === "players" ? renderPlayersSetup() : setupTab === "courses" ? renderCoursesSetup() : setupTab === "rounds" ? renderRoundsSetup() : renderBackupSetup()}
-    </section>
-  `;
-}
-
-function renderPlayersSetup() {
-  return h`
-    <div class="stack">
-      <form class="card form-grid" data-add-player>
-        <label class="field"><span>Name</span><input class="input" name="name" required /></label>
-        <button class="primary">Add player</button>
-      </form>
-      ${state.players.map((player) => {
-        const used = playerIsUsed(player.id);
-        return h`
-          <article class="card form-grid">
-            <label class="field"><span>Player</span><input class="input" value="${escapeHtml(player.name)}" data-player-name="${player.id}" /></label>
-            <div class="row">
-              <button class="chip ${player.active ? "selected" : ""}" data-toggle-player="${player.id}">${player.active ? "Active" : "Inactive"}</button>
-              <button class="danger" data-remove-player="${player.id}" ${used ? "disabled" : ""}>${used ? "In use" : "Remove"}</button>
-            </div>
-            <span class="tiny">${used ? "This player has recorded round data, so they cannot be removed without changing history." : "Remove clears this player from unplayed setup rounds."}</span>
-          </article>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
-function renderCoursesSetup() {
-  return h`
-    <div class="stack">
-      <button class="primary" data-add-course>Add course</button>
-      ${state.courses.map((course) => {
-        const used = courseHasSourceData(course.id);
-        return h`
-          <article class="card form-grid">
-            <label class="field"><span>Course name</span><input class="input" value="${escapeHtml(course.name)}" data-course-name="${course.id}" /></label>
-            ${used ? `<div class="warning setup-warning">Pars are locked because this course has recorded round data.</div>` : ""}
-            <div class="pars-grid">
-              ${course.holes.map((hole) => h`
-                <label class="hole-par tiny">H${hole.holeNumber}
-                  <input class="input" inputmode="numeric" value="${hole.par}" data-par="${course.id}|${hole.holeNumber}" ${used ? "disabled" : ""} />
-                </label>
-              `).join("")}
-            </div>
-          </article>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
-
-function renderRoundsSetup() {
-  return h`
-    <div class="stack">
-      <button class="primary" data-add-round ${activePlayers().length < 2 ? "disabled" : ""}>Add round</button>
-      ${activePlayers().length < 2 ? `<div class="card warning">Add at least 2 active players before creating rounds.</div>` : ""}
-      ${state.rounds.map((round) => {
-        const locked = Boolean(round.locked);
-        const sourceLocked = roundHasSourceData(round);
-        return h`
-          <article class="card form-grid">
-            ${locked ? `<div class="warning setup-warning">Round is locked. Unlock it on the round screen before editing setup.</div>` : ""}
-            <label class="field"><span>Round name</span><input class="input" value="${escapeHtml(round.name)}" data-round-name="${round.id}" ${locked ? "disabled" : ""} /></label>
-            <label class="field"><span>Course</span>
-              <select class="select" data-round-course="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>
-                ${state.courses.map((course) => `<option value="${course.id}" ${course.id === round.courseId ? "selected" : ""}>${escapeHtml(course.name)}</option>`).join("")}
-              </select>
-            </label>
-            <label class="field"><span>Game mode</span>
-              <select class="select" data-round-mode="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>
-                ${Object.entries(GAME_MODES).map(([id, mode]) => `<option value="${id}" ${round.gameMode === id ? "selected" : ""}>${mode.label}</option>`).join("")}
-              </select>
-              <span class="tiny">${sourceLocked ? "Mode locks after scores or awards exist." : isMatchPlay(round) ? "Pairings are Player 1 vs Player 2, Player 3 vs Player 4." : isIndividualMode(round) ? "Individual scorecards, one player per card." : "Team scorecards for scramble."}</span>
-            </label>
-            <div class="row wrap">
-              <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
-              <span class="tiny">When off, no clutch bonus is awarded for this round.</span>
-            </div>
-            <div class="three-col">
-              <label class="field"><span>Clutch hole</span><input class="input" inputmode="numeric" value="${round.clutchHole}" data-round-hole="${round.id}|clutchHole" ${locked || sourceLocked || round.clutchEnabled === false ? "disabled" : ""} /></label>
-              <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked || sourceLocked ? "disabled" : ""} /></label>
-              <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked || sourceLocked ? "disabled" : ""} /></label>
-            </div>
-            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>${isIndividualMode(round) ? "Add player card" : "Add team"}</button></div>
-            ${isMatchPlay(round) && !hasValidMatchPairings(round) ? `<div class="warning setup-warning">Match play needs an even number of player cards.</div>` : ""}
-            <div class="section-header"><h2>${isIndividualMode(round) ? "Players" : "Teams"}</h2><span class="tiny">${round.teams.length} ${isIndividualMode(round) ? "scorecards" : "teams"}</span></div>
-            <div class="stack">
-              ${isMatchPlay(round)
-                ? renderMatchPairingsSetup(round, locked || sourceLocked)
-                : round.teams.map((team, teamIndex) => renderTeamSetupBlock(round, team, teamIndex, locked || sourceLocked)).join("")}
-            </div>
-          </article>
-        `;
-      }).join("")}
-    </div>
   `;
 }
 
 function bindEvents(app) {
-  app.querySelectorAll("[data-go]").forEach((button) => button.addEventListener("click", () => go(button.dataset.go)));
-  app.querySelectorAll("[data-open-round]").forEach((button) => button.addEventListener("click", () => {
-    if (!button.dataset.openRound) return go("setup");
-    go("round", button.dataset.openRound);
-  }));
-  app.querySelectorAll("[data-score-change]").forEach((button) => button.addEventListener("click", () => changeScore(button.dataset.scoreChange)));
-  app.querySelectorAll("[data-award]").forEach((select) => {
-    select.value = state.rounds.find((round) => round.id === activeRoundId)?.awards[select.dataset.award] || "";
-    select.addEventListener("change", () => updateAward(select.dataset.award, select.value));
-  });
-  app.querySelectorAll("[data-complete-round]").forEach((button) => button.addEventListener("click", () => completeRound(button.dataset.completeRound)));
-  app.querySelectorAll("[data-reset-round]").forEach((button) => button.addEventListener("click", () => resetRound(button.dataset.resetRound)));
-  app.querySelectorAll("[data-toggle-lock]").forEach((button) => button.addEventListener("click", () => toggleLock(button.dataset.toggleLock)));
-  app.querySelectorAll("[data-setup-tab]").forEach((button) => button.addEventListener("click", () => { setupTab = button.dataset.setupTab; render(); }));
+  app.querySelectorAll("[data-sign-out]").forEach((button) => button.addEventListener("click", signOut));
+  app.querySelectorAll("[data-session-user]").forEach((select) => select.addEventListener("change", () => mutate((next) => {
+    next.session.userId = select.value;
+    const membership = next.memberships.find((item) => item.tripId === next.session.tripId && item.userId === select.value);
+    next.session.view = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
+  })));
+  app.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => mutate((next) => { next.session.view = button.dataset.view; })));
+  app.querySelectorAll("[data-admin-tab]").forEach((button) => button.addEventListener("click", () => { adminTab = button.dataset.adminTab; pendingDeleteRoundId = ""; render(); }));
+  app.querySelectorAll("[data-scoring-round]").forEach((button) => button.addEventListener("click", () => { pendingDeleteRoundId = ""; scoringRoundId = button.dataset.scoringRound; render(); }));
+  app.querySelectorAll("[data-select-player]").forEach((button) => button.addEventListener("click", () => { selectedPlayerId = button.dataset.selectPlayer; render(); }));
   app.querySelectorAll("[data-add-player]").forEach((form) => form.addEventListener("submit", addPlayer));
-  app.querySelectorAll("[data-player-name]").forEach((input) => input.addEventListener("change", () => updatePlayerName(input.dataset.playerName, input.value)));
-  app.querySelectorAll("[data-toggle-player]").forEach((button) => button.addEventListener("click", () => togglePlayer(button.dataset.togglePlayer)));
-  app.querySelectorAll("[data-remove-player]").forEach((button) => button.addEventListener("click", () => removePlayer(button.dataset.removePlayer)));
-  app.querySelectorAll("[data-add-course]").forEach((button) => button.addEventListener("click", addCourse));
+  app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
+  app.querySelectorAll("[data-add-course]").forEach((form) => form.addEventListener("submit", addCourse));
+  app.querySelectorAll("[data-update-invite-code]").forEach((form) => form.addEventListener("submit", updateInviteCode));
   app.querySelectorAll("[data-course-name]").forEach((input) => input.addEventListener("change", () => updateCourseName(input.dataset.courseName, input.value)));
-  app.querySelectorAll("[data-par]").forEach((input) => input.addEventListener("change", () => updatePar(input.dataset.par, input.value)));
-  app.querySelectorAll("[data-add-round]").forEach((button) => button.addEventListener("click", addRound));
-  app.querySelectorAll("[data-duplicate-round]").forEach((button) => button.addEventListener("click", () => duplicateRound(button.dataset.duplicateRound)));
-  app.querySelectorAll("[data-round-name]").forEach((input) => input.addEventListener("change", () => updateRoundName(input.dataset.roundName, input.value)));
-  app.querySelectorAll("[data-round-course]").forEach((select) => select.addEventListener("change", () => updateRoundCourse(select.dataset.roundCourse, select.value)));
-  app.querySelectorAll("[data-round-mode]").forEach((select) => select.addEventListener("change", () => updateRoundGameMode(select.dataset.roundMode, select.value)));
-  app.querySelectorAll("[data-round-hole]").forEach((input) => input.addEventListener("change", () => updateRoundHole(input.dataset.roundHole, input.value)));
-  app.querySelectorAll("[data-round-notes]").forEach((input) => input.addEventListener("change", () => updateRoundNotes(input.dataset.roundNotes, input.value)));
-  app.querySelectorAll("[data-toggle-clutch]").forEach((button) => button.addEventListener("click", () => toggleClutch(button.dataset.toggleClutch)));
-  app.querySelectorAll("[data-add-team]").forEach((button) => button.addEventListener("click", () => addTeam(button.dataset.addTeam)));
-  app.querySelectorAll("[data-remove-team]").forEach((button) => button.addEventListener("click", () => removeTeam(button.dataset.removeTeam)));
-  app.querySelectorAll("[data-toggle-team-player]").forEach((button) => button.addEventListener("click", () => toggleTeamPlayer(button.dataset.toggleTeamPlayer)));
-  app.querySelectorAll("[data-set-team-player]").forEach((select) => select.addEventListener("change", () => setTeamPlayer(select.dataset.setTeamPlayer, select.value)));
-  app.querySelectorAll("[data-leaderboard-round]").forEach((select) => select.addEventListener("change", () => { leaderboardRoundId = select.value; selectedLeaderboardPlayerId = ""; render(); }));
-  app.querySelectorAll("[data-export-image]").forEach((button) => button.addEventListener("click", exportLeaderboardImage));
-  app.querySelectorAll("[data-leader-player]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = button.dataset.leaderPlayer; render(); }));
-  app.querySelectorAll("[data-close-breakdown]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = ""; render(); }));
-  app.querySelectorAll("[data-export-backup]").forEach((button) => button.addEventListener("click", exportBackup));
-  app.querySelectorAll("[data-import-backup]").forEach((input) => input.addEventListener("change", importBackup));
+  app.querySelectorAll("[data-course-hole]").forEach((input) => input.addEventListener("change", () => updateCourseHole(input.dataset.courseHole, input.value)));
+  app.querySelectorAll("[data-score]").forEach((button) => button.addEventListener("click", () => changeScore(button.dataset.score)));
+  app.querySelectorAll("[data-award]").forEach((select) => select.addEventListener("change", () => setAward(select.dataset.award, select.value)));
+  app.querySelectorAll("[data-complete-round]").forEach((button) => button.addEventListener("click", () => completeRound(button.dataset.completeRound)));
+  app.querySelectorAll("[data-lock-round]").forEach((button) => button.addEventListener("click", () => toggleRoundLock(button.dataset.lockRound)));
+  app.querySelectorAll("[data-toggle-entry-player]").forEach((button) => button.addEventListener("click", () => toggleEntryPlayer(button.dataset.toggleEntryPlayer)));
+  app.querySelectorAll("[data-set-entry-player]").forEach((select) => select.addEventListener("change", () => setEntryPlayer(select.dataset.setEntryPlayer, select.value)));
+  app.querySelectorAll("[data-remove-entry]").forEach((button) => button.addEventListener("click", () => removeEntry(button.dataset.removeEntry)));
+  app.querySelectorAll("[data-remove-round]").forEach((button) => button.addEventListener("click", () => removeRound(button.dataset.removeRound)));
+  app.querySelectorAll("[data-set-scorer]").forEach((select) => select.addEventListener("change", () => setEntryScorer(select.dataset.setScorer, select.value)));
+  app.querySelectorAll("[data-submit-entry]").forEach((button) => button.addEventListener("click", () => submitEntry(button.dataset.submitEntry)));
+  app.querySelectorAll("[data-approve-entry]").forEach((button) => button.addEventListener("click", () => approveEntry(button.dataset.approveEntry)));
+  app.querySelectorAll("[data-join-trip]").forEach((form) => form.addEventListener("submit", joinTrip));
+  app.querySelectorAll("[data-claim-player]").forEach((form) => form.addEventListener("submit", claimPlayer));
 }
 
-function changeScore(payload) {
-  const [roundId, teamId, holeNumber, delta] = payload.split("|");
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
-    const course = draft.courses.find((item) => item.id === round.courseId);
-    const par = course?.holes.find((hole) => hole.holeNumber === Number(holeNumber))?.par || 4;
-    round.scoresByHole[teamId] ||= {};
-    const currentRaw = round.scoresByHole[teamId][holeNumber];
-    const current = currentRaw === "" || currentRaw === undefined ? null : Number(currentRaw);
-    const nextValue = current === null ? (Number(delta) > 0 ? par : par - 1) : current + Number(delta);
-    const next = Math.max(1, Math.min(12, nextValue));
-    round.scoresByHole[teamId][holeNumber] = next;
-    syncRoundStatus(draft, roundId);
-  });
+async function sendMagicLink(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const email = String(new FormData(form).get("email") || "").trim().toLowerCase();
+  if (!email) return;
+  try {
+    await adapter.sendMagicLink(email);
+    authEmailSent = email;
+    notice = "";
+  } catch (error) {
+    console.warn("Magic link failed.", error);
+    notice = error.message || "Could not send the magic link.";
+  }
+  render();
 }
 
-function updateAward(key, value) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === activeRoundId);
-    if (!round || round.locked) return;
-    round.awards[key] = value;
-    syncRoundStatus(draft, round.id);
-  });
+async function signOut() {
+  try {
+    await adapter.signOut();
+    authUser = null;
+    notice = "Signed out.";
+  } catch (error) {
+    console.warn("Sign out failed.", error);
+    notice = error.message || "Could not sign out.";
+  }
+  render();
 }
 
-function completeRound(roundId) {
-  let completed = false;
-  setState((draft) => {
-    syncRoundStatus(draft, roundId, true);
-    const round = draft.rounds.find((item) => item.id === roundId);
-    completed = round?.status === STATES.COMPLETE;
-  });
-  if (completed) go("summary", roundId);
-}
-function resetRound(roundId) {
-  if (pendingResetRoundId !== roundId) {
-    pendingResetRoundId = roundId;
+function joinTrip(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const inviteCode = String(data.get("inviteCode") || "").trim().toUpperCase();
+  if (SUPABASE_ENABLED) {
+    joinTripRemote(inviteCode);
+    return;
+  }
+  const trip = db.trips.find((item) => item.inviteCode.toUpperCase() === inviteCode);
+  if (!trip) {
+    notice = "Invite code not found.";
     render();
     return;
   }
-  pendingResetRoundId = "";
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
-    round.scoresByHole = {};
-    round.awards = { longestDrivePlayerId: "", nearestPinPlayerId: "" };
-    round.status = STATES.NOT_STARTED;
-    round.updatedAt = todayIso();
-  });
+  const name = String(data.get("name") || "").trim();
+  const email = String(data.get("email") || "").trim().toLowerCase();
+  mutate((next) => {
+    let user = next.users.find((item) => item.email.toLowerCase() === email);
+    if (!user) {
+      user = { id: uid("user"), name, email };
+      next.users.push(user);
+    }
+    if (!next.memberships.some((membership) => membership.tripId === trip.id && membership.userId === user.id)) {
+      next.memberships.push({ id: uid("member"), tripId: trip.id, userId: user.id, role: ROLES.PLAYER, playerId: "" });
+    }
+    next.session.userId = user.id;
+    next.session.tripId = trip.id;
+    next.session.view = "player";
+    notice = "You joined the trip. Claim your player profile next.";
+  }, `Joined trip ${trip.name}`);
 }
 
-function toggleLock(roundId) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round) return;
-    round.locked = !round.locked;
-    round.updatedAt = todayIso();
-  });
+async function joinTripRemote(inviteCode) {
+  try {
+    await adapter.joinTrip(inviteCode);
+    db = await adapter.loadRemote();
+    db.session.view = "player";
+    scoringRoundId = db.session.activeRoundId || "";
+    notice = "You joined the trip. Claim your player profile next.";
+  } catch (error) {
+    console.warn("Join trip failed.", error);
+    notice = error.message || "Invite code not found.";
+  }
+  render();
+}
+
+function claimPlayer(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const playerId = String(new FormData(form).get("playerId") || "");
+  if (!playerId) return;
+  if (SUPABASE_ENABLED) {
+    claimPlayerRemote(playerId);
+    return;
+  }
+  mutate((next) => {
+    const membership = next.memberships.find((item) => item.tripId === next.session.tripId && item.userId === next.session.userId);
+    if (!membership) return;
+    const alreadyClaimed = next.memberships.some((item) => item.tripId === next.session.tripId && item.playerId === playerId && item.userId !== next.session.userId);
+    if (alreadyClaimed) {
+      notice = "That player profile has already been claimed.";
+      return;
+    }
+    membership.playerId = playerId;
+    notice = "Profile claimed. Your scorecards are ready when assigned.";
+  }, "Claimed player profile");
+}
+
+async function claimPlayerRemote(playerId) {
+  try {
+    await adapter.claimPlayer(playerId);
+    db = await adapter.loadRemote();
+    db.session.view = "player";
+    notice = "Profile claimed. Your scorecards are ready when assigned.";
+  } catch (error) {
+    console.warn("Claim player failed.", error);
+    notice = error.message || "Could not claim that player profile.";
+  }
+  render();
+}
+
+function updateInviteCode(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const raw = String(new FormData(form).get("inviteCode") || "").trim().toUpperCase();
+  const inviteCode = raw.replace(/[^A-Z0-9-]/g, "").slice(0, 16);
+  if (inviteCode.length < 4) {
+    notice = "Invite code must be at least 4 letters or numbers.";
+    render();
+    return;
+  }
+  mutate((next) => {
+    const taken = next.trips.some((trip) => trip.id !== next.session.tripId && trip.inviteCode.toUpperCase() === inviteCode);
+    if (taken) {
+      notice = "That invite code is already in use.";
+      return;
+    }
+    const trip = next.trips.find((item) => item.id === next.session.tripId);
+    if (trip) trip.inviteCode = inviteCode;
+    notice = "Invite code updated.";
+  }, "Updated invite code");
 }
 
 function addPlayer(event) {
@@ -1184,388 +1360,277 @@ function addPlayer(event) {
   const data = new FormData(form);
   const name = String(data.get("name") || "").trim();
   if (!name) return;
-  setState((draft) => {
-    draft.players.push({ id: uid("player"), name, active: true });
-  });
+  mutate((next) => {
+    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: Number(data.get("handicap")) || "", active: true });
+  }, `Added player ${name}`);
 }
 
-function updatePlayerName(playerId, name) {
-  setState((draft) => {
-    const player = draft.players.find((item) => item.id === playerId);
-    if (player && name.trim()) player.name = name.trim();
-  });
-}
-
-function togglePlayer(playerId) {
-  setState((draft) => {
-    const player = draft.players.find((item) => item.id === playerId);
-    if (player) player.active = !player.active;
-  });
-}
-
-function removePlayer(playerId) {
-  setState((draft) => {
-    if (playerIsUsed(playerId, draft)) return;
-    draft.rounds.forEach((round) => {
-      if (roundHasSourceData(round)) return;
-      round.teams.forEach((team) => {
-        team.playerIds = team.playerIds.filter((id) => id !== playerId);
-      });
+function addCourse(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const name = String(data.get("name") || "").trim();
+  if (!name) return;
+  mutate((next) => {
+    next.courses.push({
+      id: uid("course"),
+      tripId: next.session.tripId,
+      name,
+      holes: defaultPars.map((par, index) => ({
+        holeNumber: index + 1,
+        par,
+      })),
     });
-    draft.players = draft.players.filter((player) => player.id !== playerId);
-  });
-}
-
-function addCourse() {
-  setState((draft) => {
-    draft.courses.push({ ...defaultCourse(), name: `Course ${draft.courses.length + 1}` });
-  });
+  }, `Added course ${name}`);
 }
 
 function updateCourseName(courseId, name) {
-  setState((draft) => {
-    const course = draft.courses.find((item) => item.id === courseId);
+  mutate((next) => {
+    const course = next.courses.find((item) => item.id === courseId);
     if (course && name.trim()) course.name = name.trim();
-  });
+  }, "Updated course name");
 }
 
-function updatePar(payload, value) {
-  const [courseId, holeNumber] = payload.split("|");
-  setState((draft) => {
-    if (courseHasSourceData(courseId, draft)) return;
-    const course = draft.courses.find((item) => item.id === courseId);
-    const hole = course?.holes.find((item) => item.holeNumber === Number(holeNumber));
-    if (hole) hole.par = Math.max(3, Math.min(6, Number(value) || hole.par));
-  });
+function updateCourseHole(payload, value) {
+  const [courseId, holeNumberRaw, key] = payload.split("|");
+  mutate((next) => {
+    if (next.rounds.some((round) => round.courseId === courseId && roundHasSourceData(round))) return;
+    const course = next.courses.find((item) => item.id === courseId);
+    const hole = course?.holes.find((item) => item.holeNumber === Number(holeNumberRaw));
+    if (!hole) return;
+    hole.par = Math.max(3, Math.min(6, Number(value) || hole.par));
+  }, "Updated course hole");
 }
 
-function addRound() {
-  setState((draft) => {
-    const players = activePlayers(draft);
-    if (players.length < 2) return;
-    const midpoint = Math.ceil(players.length / 2);
-    draft.rounds.push({
-      id: uid("round"),
-      name: `Day ${draft.rounds.length + 1}`,
-      gameMode: "SCRAMBLE",
-      courseId: draft.courses[0]?.id,
-      teams: [
-        { id: uid("team"), playerIds: players.slice(0, midpoint).map((player) => player.id) },
-        { id: uid("team"), playerIds: players.slice(midpoint).map((player) => player.id) },
-      ],
-      scoresByHole: {},
-      awards: { longestDrivePlayerId: "", nearestPinPlayerId: "" },
-      clutchHole: 18,
-      clutchEnabled: true,
-      longestDriveHole: 9,
-      nearestPinHole: 12,
-      status: STATES.NOT_STARTED,
-      locked: false,
-      updatedAt: todayIso(),
-    });
-  });
-}
-
-function duplicateRound(roundId) {
-  setState((draft) => {
-    const source = draft.rounds.find((round) => round.id === roundId) || draft.rounds.at(-1);
-    if (!source) return;
-    const copy = cloneData(source);
-    copy.id = uid("round");
-    copy.name = `${source.name} copy`;
-    const activeIds = new Set(activePlayers(draft).map((player) => player.id));
-    copy.teams = source.teams.map((team) => {
-      const nextId = uid("team");
-      return { id: nextId, playerIds: team.playerIds.filter((id) => activeIds.has(id)) };
-    }).filter((team) => team.playerIds.length > 0);
-    copy.scoresByHole = {};
-    copy.awards = { longestDrivePlayerId: "", nearestPinPlayerId: "" };
-    copy.status = STATES.NOT_STARTED;
-    copy.locked = false;
-    copy.updatedAt = todayIso();
-    draft.rounds.push(copy);
-  });
-}
-
-function updateRoundName(roundId, name) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked && name.trim()) round.name = name.trim();
-  });
-}
-
-function updateRoundCourse(roundId, courseId) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked && !roundHasSourceData(round)) {
-      round.courseId = courseId;
-      syncRoundStatus(draft, roundId);
+function addRound(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const name = String(data.get("name") || "").trim();
+  const gameMode = String(data.get("gameMode"));
+  const selectedCourseId = String(data.get("courseId") || "");
+  const players = tripPlayers();
+  mutate((next) => {
+    const roundId = uid("round");
+    const courseId = selectedCourseId || next.courses.find((course) => course.tripId === next.session.tripId)?.id;
+    next.rounds.push({ id: roundId, tripId: next.session.tripId, courseId, name, gameMode, clutchEnabled: true, clutchHole: 18, longestDriveHole: 9, nearestPinHole: 12, status: ROUND_STATES.NOT_STARTED, locked: false, updatedAt: nowIso() });
+    const count = gameMode === "SCRAMBLE" ? 2 : Math.max(2, players.length);
+    for (let index = 0; index < count; index += 1) {
+      const entryId = uid("entry");
+      next.roundEntries.push({ id: entryId, roundId, position: index });
+      if (gameMode !== "SCRAMBLE" && players[index]) next.roundEntryPlayers.push({ id: uid("entry_player"), roundEntryId: entryId, playerId: players[index].id });
     }
-  });
+    next.session.activeRoundId = roundId;
+    scoringRoundId = roundId;
+  }, `Created round ${name}`);
 }
 
-function buildDefaultTeamsForMode(modeId, players) {
-  if (["player", "match"].includes(GAME_MODES[modeId]?.scoring)) {
-    return players.map((player) => ({ id: uid("team"), playerIds: [player.id] }));
+function removeRound(roundId) {
+  const round = db.rounds.find((item) => item.id === roundId);
+  if (!round || round.locked || !canAdmin()) return;
+  if (roundHasSourceData(round) && pendingDeleteRoundId !== roundId) {
+    pendingDeleteRoundId = roundId;
+    notice = "Tap Confirm to remove this round and all its scorecards, scores, awards, submissions, and approvals.";
+    render();
+    return;
   }
-  const midpoint = Math.ceil(players.length / 2);
-  return [
-    { id: uid("team"), playerIds: players.slice(0, midpoint).map((player) => player.id) },
-    { id: uid("team"), playerIds: players.slice(midpoint).map((player) => player.id) },
-  ];
+  pendingDeleteRoundId = "";
+  mutate((next) => {
+    const entryIds = next.roundEntries.filter((entry) => entry.roundId === roundId).map((entry) => entry.id);
+    next.rounds = next.rounds.filter((item) => item.id !== roundId);
+    next.roundEntries = next.roundEntries.filter((entry) => entry.roundId !== roundId);
+    next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => !entryIds.includes(item.roundEntryId));
+    next.scores = next.scores.filter((score) => !entryIds.includes(score.roundEntryId));
+    next.awards = next.awards.filter((award) => award.roundId !== roundId);
+    if (next.session.activeRoundId === roundId) next.session.activeRoundId = next.rounds.find((item) => item.tripId === next.session.tripId)?.id || "";
+    if (scoringRoundId === roundId) scoringRoundId = next.session.activeRoundId;
+    notice = "Round removed.";
+  }, `Removed round ${round.name}`);
 }
 
-function updateRoundGameMode(roundId, modeId) {
-  if (!GAME_MODES[modeId]) return;
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    round.gameMode = modeId;
-    round.teams = buildDefaultTeamsForMode(modeId, activePlayers(draft));
-    round.scoresByHole = {};
-    round.awards = { longestDrivePlayerId: "", nearestPinPlayerId: "" };
-    syncRoundStatus(draft, roundId);
+function changeScore(payload) {
+  const [roundId, entryId, holeNumberRaw, deltaRaw] = payload.split("|");
+  const holeNumber = Number(holeNumberRaw);
+  const delta = Number(deltaRaw);
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    const entry = next.roundEntries.find((item) => item.id === entryId);
+    if (!round || !entry || round.locked || !playerCanEditEntry(round, entry)) return;
+    entry.submittedBy = "";
+    entry.submittedAt = "";
+    entry.approvedBy = "";
+    entry.approvedAt = "";
+    const course = next.courses.find((item) => item.id === round.courseId);
+    const par = course?.holes.find((hole) => hole.holeNumber === holeNumber)?.par || 4;
+    const existing = next.scores.find((score) => score.roundEntryId === entryId && score.holeNumber === holeNumber);
+    if (existing) existing.strokes = Math.max(1, Math.min(12, existing.strokes + delta));
+    else next.scores.push({ id: uid("score"), roundEntryId: entryId, holeNumber, strokes: Math.max(1, Math.min(12, par + (delta > 0 ? 0 : -1))), updatedAt: nowIso() });
+    round.status = derivedStatus(round);
+    round.updatedAt = nowIso();
   });
 }
 
-function updateRoundNotes(roundId, value) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked) {
-      round.notes = value;
-      round.updatedAt = todayIso();
-    }
+function setAward(payload, playerId) {
+  const [roundId, type] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    next.awards = next.awards.filter((award) => !(award.roundId === roundId && award.type === type));
+    if (playerId) next.awards.push({ id: uid("award"), roundId, type, playerId });
+    round.status = derivedStatus(round);
   });
 }
 
-function updateRoundHole(payload, value) {
-  const [roundId, key] = payload.split("|");
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked && !roundHasSourceData(round)) round[key] = Math.max(1, Math.min(18, Number(value) || round[key]));
-  });
+function completeRound(roundId) {
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    round.status = isRoundComplete(round) ? ROUND_STATES.COMPLETE : derivedStatus(round);
+  }, "Completed round");
 }
 
-function toggleClutch(roundId) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    round.clutchEnabled = round.clutchEnabled === false;
-    round.updatedAt = todayIso();
-  });
+function toggleRoundLock(roundId) {
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (round) round.locked = !round.locked;
+  }, "Changed round lock");
 }
 
-function addTeam(roundId) {
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    round.teams.push({ id: uid("team"), playerIds: [] });
-    syncRoundStatus(draft, roundId);
-  });
-}
-
-function removeTeam(payload) {
-  const [roundId, teamId] = payload.split("|");
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    round.teams = round.teams.filter((team) => team.id !== teamId);
-    delete round.scoresByHole[teamId];
-    cleanRoundAwards(round);
-    syncRoundStatus(draft, roundId);
-  });
-}
-
-function toggleTeamPlayer(payload) {
-  const [roundId, teamId, playerId] = payload.split("|");
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    const team = round.teams.find((item) => item.id === teamId);
-    if (!team) return;
-    const alreadySelected = team.playerIds.includes(playerId);
-    round.teams.forEach((item) => {
-      item.playerIds = item.playerIds.filter((id) => id !== playerId);
+function toggleEntryPlayer(payload) {
+  const [roundId, entryId, playerId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    const entryIds = next.roundEntries.filter((entry) => entry.roundId === roundId).map((entry) => entry.id);
+    const selected = next.roundEntryPlayers.some((item) => item.roundEntryId === entryId && item.playerId === playerId);
+    next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => {
+      if (!entryIds.includes(item.roundEntryId)) return true;
+      if (item.roundEntryId === entryId && item.playerId === playerId) return false;
+      return item.playerId !== playerId;
     });
-    if (!alreadySelected) team.playerIds = isIndividualMode(round) ? [playerId] : [...team.playerIds, playerId];
-    cleanRoundAwards(round);
-    syncRoundStatus(draft, roundId);
+    if (!selected) next.roundEntryPlayers.push({ id: uid("entry_player"), roundEntryId: entryId, playerId });
   });
 }
 
-
-function setTeamPlayer(payload, playerId) {
-  const [roundId, teamId] = payload.split("|");
-  setState((draft) => {
-    const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked || roundHasSourceData(round)) return;
-    const team = round.teams.find((item) => item.id === teamId);
-    if (!team) return;
-    team.playerIds = [];
-    if (playerId) {
-      round.teams.forEach((item) => {
-        if (item.id !== teamId) item.playerIds = item.playerIds.filter((id) => id !== playerId);
-      });
-      team.playerIds = [playerId];
-    }
-    cleanRoundAwards(round);
-    syncRoundStatus(draft, roundId);
+function setEntryPlayer(payload, playerId) {
+  const [roundId, entryId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    const entryIds = next.roundEntries.filter((entry) => entry.roundId === roundId).map((entry) => entry.id);
+    next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => {
+      if (!entryIds.includes(item.roundEntryId)) return true;
+      if (item.roundEntryId === entryId) return false;
+      return item.playerId !== playerId;
+    });
+    if (playerId) next.roundEntryPlayers.push({ id: uid("entry_player"), roundEntryId: entryId, playerId });
   });
 }
 
-function downloadFile(filename, content, type) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(url);
+function setEntryScorer(payload, playerId) {
+  const [roundId, entryId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    const entry = next.roundEntries.find((item) => item.id === entryId);
+    if (!round || !entry || round.locked || !canAdmin()) return;
+    entry.scorerPlayerId = playerId;
+  }, "Changed scorecard owner");
 }
 
-function exportBackup() {
-  const backup = {
-    ...state,
-    exportedAt: todayIso(),
-  };
-  downloadFile("golf-trip-backup.json", JSON.stringify(backup, null, 2), "application/json");
+function submitEntry(payload) {
+  const [roundId, entryId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    const entry = next.roundEntries.find((item) => item.id === entryId);
+    if (!round || !entry || !playerCanEditEntry(round, entry) || !isEntryComplete(round, entry)) return;
+    entry.submittedBy = next.session.userId;
+    entry.submittedAt = nowIso();
+    entry.approvedBy = "";
+    entry.approvedAt = "";
+  }, "Submitted scorecard");
 }
 
-function importBackup(event) {
-  const file = event.currentTarget.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const restored = normalizeData(JSON.parse(String(reader.result)));
-      state = restored;
-      activeRoundId = state.lastRoundId || state.rounds[0]?.id || "";
-      selectedLeaderboardPlayerId = "";
-      saveState();
-      render();
-    } catch (error) {
-      storageWarning = "Backup could not be restored. The file does not look valid.";
-      console.warn("Backup import failed.", error);
-      render();
-    }
-  };
-  reader.readAsText(file);
+function approveEntry(payload) {
+  const [roundId, entryId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    const entry = next.roundEntries.find((item) => item.id === entryId);
+    if (!round || !entry || round.locked || !canAdmin() || !entry.submittedAt || !isEntryComplete(round, entry)) return;
+    entry.approvedBy = next.session.userId;
+    entry.approvedAt = nowIso();
+  }, "Approved scorecard");
 }
 
-function exportLeaderboardImage() {
-  const leaderboardData = leaderboardDataThrough(leaderboardRoundId);
-  const leaderboard = calculateLeaderboardTrends(leaderboardData);
-  const clutchActive = leaderboardData.rounds.some((round) => round.status === STATES.COMPLETE && round.clutchEnabled !== false);
-  const leaders = leaderboard.filter((row) => row.rank === 1);
-  const completedRounds = leaderboardData.rounds.filter((round) => round.status === STATES.COMPLETE);
-  const selectedRound = leaderboardRoundId === "all" ? null : state.rounds.find((round) => round.id === leaderboardRoundId);
-  const exportLabel = selectedRound ? "After " + selectedRound.name : "Latest standings";
-  const width = 1080;
-  const rowHeight = 92;
-  const topHeight = 240;
-  const height = Math.max(720, topHeight + leaderboard.length * rowHeight + 84);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const fitText = (text, maxWidth) => {
-    const value = String(text || "");
-    if (ctx.measureText(value).width <= maxWidth) return value;
-    let next = value;
-    while (next.length > 1 && ctx.measureText(next + "…").width > maxWidth) {
-      next = next.slice(0, -1);
-    }
-    return next + "…";
-  };
-
-  const roundRect = (x, y, w, h, r) => {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
-    ctx.fill();
-  };
-
-  ctx.fillStyle = "#F7F5EF";
-  ctx.fillRect(0, 0, width, height);
-  ctx.fillStyle = "#16392f";
-  roundRect(44, 36, width - 88, 164, 18);
-
-  ctx.fillStyle = "#FFFFFF";
-  ctx.textAlign = "center";
-  ctx.font = "800 52px system-ui";
-  ctx.fillText("Golf Trip Leaderboard", width / 2, 98);
-  ctx.font = "700 30px system-ui";
-  ctx.fillText(fitText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width - 160), width / 2, 148);
-  ctx.font = "600 22px system-ui";
-  ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
-  ctx.fillText(exportLabel + " · " + completedRounds.length + " completed round" + (completedRounds.length === 1 ? "" : "s"), width / 2, 178);
-
-  leaderboard.forEach((row, index) => {
-    const y = topHeight + index * rowHeight;
-    const x = 64;
-    const w = width - 128;
-    const h = 72;
-    ctx.fillStyle = row.rank === 1 ? "#FFF4CC" : row.rank === 2 ? "#E6E6E6" : row.rank === 3 ? "#F4E1D2" : "#FFFFFF";
-    roundRect(x, y, w, h, 14);
-
-    ctx.fillStyle = "#16392f";
-    ctx.font = "900 28px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText(String(row.rank), x + 42, y + 46);
-
-    ctx.fillStyle = row.trend === "up" ? "#19754f" : row.trend === "down" ? "#b84b42" : "#9a6700";
-    ctx.font = "900 24px system-ui";
-    ctx.fillText(trendSymbol(row), x + 96, y + 46);
-
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#16201d";
-    ctx.font = "800 30px system-ui";
-    ctx.fillText(fitText(row.name, w - 330), x + 190, y + 33);
-
-    ctx.fillStyle = "#6a746f";
-    ctx.font = "700 18px system-ui";
-    const detail = [`LD ${row.longestDrivePoints}`, `NP ${row.nearestPinPoints}`];
-    if (clutchActive) detail.push(`Clutch ${row.clutchPoints}`);
-    ctx.fillText(fitText(detail.join("   "), w - 330), x + 190, y + 58);
-
-    ctx.textAlign = "right";
-    ctx.fillStyle = "#16392f";
-    ctx.font = "900 34px system-ui";
-    ctx.fillText(String(row.points), x + w - 38, y + 46);
-  });
-
-  canvas.toBlob((blob) => {
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "golf-trip-leaderboard.png";
-    link.click();
-    URL.revokeObjectURL(url);
-  }, "image/png");
+function removeEntry(payload) {
+  const [roundId, entryId] = payload.split("|");
+  mutate((next) => {
+    const round = next.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked) return;
+    next.roundEntries = next.roundEntries.filter((entry) => entry.id !== entryId);
+    next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => item.roundEntryId !== entryId);
+    next.scores = next.scores.filter((score) => score.roundEntryId !== entryId);
+  }, "Removed round entry");
 }
 
-
-if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("./sw.js").catch((error) => {
-      console.warn("Service worker registration failed.", error);
-    });
+    navigator.serviceWorker.register("./sw.js").catch((error) => console.warn("Service worker registration failed.", error));
   });
+}
+
+function backfillScorecardOwners() {
+  db.roundEntries.forEach((entry) => {
+    if (entry.scorerPlayerId) return;
+    const firstPlayerId = entryPlayerIds(entry)[0] || "";
+    if (firstPlayerId) entry.scorerPlayerId = firstPlayerId;
+  });
+  persist();
+}
+
+async function initializeApp() {
+  if (!SUPABASE_ENABLED) {
+    backfillScorecardOwners();
+    render();
+    return;
+  }
+  try {
+    authUser = await adapter.authUser();
+    if (authUser) {
+      db = await adapter.loadRemote();
+      db.session.userId = authUser.id;
+      const membership = currentMembership();
+      db.session.view = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
+      scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
+    }
+    supabaseClient.auth.onAuthStateChange(async (_event, session) => {
+      authUser = session?.user || null;
+      if (authUser) {
+        try {
+          db = await adapter.loadRemote();
+          db.session.userId = authUser.id;
+          const membership = currentMembership();
+          db.session.view = [ROLES.OWNER, ROLES.ADMIN].includes(membership?.role) ? "admin" : "player";
+          scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
+          notice = "Signed in.";
+        } catch (error) {
+          console.warn("Supabase reload failed.", error);
+          notice = error.message || "Could not load your trip.";
+        }
+      }
+      booting = false;
+      render();
+    });
+  } catch (error) {
+    console.warn("Supabase startup failed.", error);
+    notice = error.message || "Could not connect to Supabase.";
+  }
+  booting = false;
+  render();
 }
 
 window.addEventListener("error", (event) => {
-  console.warn("Recovered from app error", event.error);
+  notice = "Recovered from an app error. Your saved data is still intact.";
+  console.warn("Recovered from app error.", event.error);
 });
 
-render();
+initializeApp();

@@ -1,10 +1,10 @@
 {
-  "name": "Golf Trip App",
-  "short_name": "Golf Trip",
+  "name": "Golf Trip Pro",
+  "short_name": "Golf Pro",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#F7F5EF",
-  "theme_color": "#16392f",
+  "theme_color": "#102f2a",
   "icons": [
     {
       "src": "./icons/icon-192.png",

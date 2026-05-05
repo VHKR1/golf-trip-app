@@ -1,0 +1,10 @@
+{
+  "name": "golf-trip-pro",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check app.js && node --check sw.js",
+    "serve": "python3 -m http.server 8080"
+  }
+}
