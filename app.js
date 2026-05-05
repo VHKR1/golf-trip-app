@@ -286,22 +286,21 @@ class SupabaseDatabaseAdapter {
   }
 
   async ensureStarterTrip(user) {
+    const tripId = crypto.randomUUID();
     const inviteCode = `GOLF-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    const { data: trip, error: tripError } = await this.client
+    const { error: tripError } = await this.client
       .from("trips")
-      .insert({ name: "Golf Trip", invite_code: inviteCode, created_by: user.id })
-      .select()
-      .single();
+      .insert({ id: tripId, name: "Golf Trip", invite_code: inviteCode, created_by: user.id });
     if (tripError) throw tripError;
 
     const { error: membershipError } = await this.client
       .from("trip_memberships")
-      .insert({ trip_id: trip.id, user_id: user.id, role: ROLES.OWNER });
+      .insert({ trip_id: tripId, user_id: user.id, role: ROLES.OWNER });
     if (membershipError) throw membershipError;
 
     const { data: course, error: courseError } = await this.client
       .from("courses")
-      .insert({ trip_id: trip.id, name: "Course" })
+      .insert({ trip_id: tripId, name: "Course" })
       .select()
       .single();
     if (courseError) throw courseError;
@@ -310,7 +309,7 @@ class SupabaseDatabaseAdapter {
       .from("course_holes")
       .insert(defaultPars.map((par, index) => ({ course_id: course.id, hole_number: index + 1, par })));
     if (holesError) throw holesError;
-    return trip.id;
+    return tripId;
   }
 
   async loadRemote() {

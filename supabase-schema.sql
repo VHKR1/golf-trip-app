@@ -386,7 +386,10 @@ drop policy if exists "admins can manage scores" on scores;
 drop policy if exists "members can read awards" on awards;
 drop policy if exists "admins can manage awards" on awards;
 
-create policy "members can read trips" on trips for select to authenticated using (private.is_trip_member(id));
+create policy "authorized can read trips" on trips for select to authenticated using (
+  private.is_trip_member(id)
+  or created_by = (select auth.uid())
+);
 create policy "users can create trips" on trips for insert to authenticated with check (created_by = (select auth.uid()));
 create policy "admins can update trips" on trips for update to authenticated using (private.is_trip_admin(id)) with check (private.is_trip_admin(id));
 create policy "admins can delete trips" on trips for delete to authenticated using (private.is_trip_admin(id));
