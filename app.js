@@ -14,7 +14,7 @@ const DEFAULT_POINTS = {
 };
 const GAME_MODES = {
   SCRAMBLE: { label: "Scramble", scoring: "team", totalLabel: "Strokes", higherWins: false },
-  STROKE_PLAY: { label: "Stroke play", scoring: "player", totalLabel: "Strokes", higherWins: false },
+  MATCH_PLAY: { label: "Match play", scoring: "match", totalLabel: "Holes", higherWins: true },
   STABLEFORD: { label: "Stableford", scoring: "player", totalLabel: "Points", higherWins: true },
 };
 
@@ -81,7 +81,7 @@ function normalizeData(data) {
   clean.rounds = clean.rounds.map((round) => ({
     id: round.id || uid("round"),
     name: round.name || "Round",
-    gameMode: GAME_MODES[round.gameMode] ? round.gameMode : "SCRAMBLE",
+    gameMode: GAME_MODES[round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode] ? (round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode) : "SCRAMBLE",
     courseId: round.courseId || clean.courses[0].id,
     teams: Array.isArray(round.teams) ? round.teams : [],
     scoresByHole: round.scoresByHole || {},
@@ -137,7 +137,11 @@ function gameModeFor(round) {
 }
 
 function isIndividualMode(round) {
-  return gameModeFor(round).scoring === "player";
+  return ["player", "match"].includes(gameModeFor(round).scoring);
+}
+
+function isMatchPlay(round) {
+  return gameModeFor(round).scoring === "match";
 }
 
 function teamLabel(team, round = null) {
@@ -193,6 +197,10 @@ function scoringEntityName(round) {
   return isIndividualMode(round) ? "players" : "teams";
 }
 
+function hasValidMatchPairings(round) {
+  return !isMatchPlay(round) || playableTeams(round).length % 2 === 0;
+}
+
 function roundPlayerIds(round) {
   return new Set(round.teams.flatMap((team) => team.playerIds));
 }
@@ -205,7 +213,7 @@ function cleanRoundAwards(round) {
 
 function isRoundComplete(round, course) {
   const scoringGroups = playableTeams(round);
-  const hasEnoughGroups = scoringGroups.length >= 2;
+  const hasEnoughGroups = scoringGroups.length >= 2 && hasValidMatchPairings(round);
   const allScored = hasEnoughGroups && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
   return Boolean(allScored && round.awards.longestDrivePlayerId && round.awards.nearestPinPlayerId);
 }
@@ -241,16 +249,53 @@ function calculateScoringTotal(round, teamId, course = courseFor(round)) {
   return round.gameMode === "STABLEFORD" ? calculateStablefordTotal(round, teamId, course) : calculateTeamTotal(round, teamId);
 }
 
+function matchOpponent(round, teamId) {
+  const teams = playableTeams(round);
+  const index = teams.findIndex((team) => team.id === teamId);
+  if (index < 0) return null;
+  return teams[index % 2 === 0 ? index + 1 : index - 1] || null;
+}
+
+function calculateMatchPlayResult(round, teamId, course = courseFor(round)) {
+  const opponent = matchOpponent(round, teamId);
+  const result = { holesWon: 0, holesLost: 0, holesTied: 0, result: "—" };
+  if (!opponent) return result;
+  course.holes.forEach((hole) => {
+    const score = Number(round.scoresByHole?.[teamId]?.[hole.holeNumber]);
+    const opponentScore = Number(round.scoresByHole?.[opponent.id]?.[hole.holeNumber]);
+    if (!Number.isFinite(score) || !Number.isFinite(opponentScore)) return;
+    if (score < opponentScore) result.holesWon += 1;
+    else if (score > opponentScore) result.holesLost += 1;
+    else result.holesTied += 1;
+  });
+  if (result.holesWon > result.holesLost) result.result = "Win";
+  else if (result.holesWon < result.holesLost) result.result = "Loss";
+  else result.result = "Tie";
+  return result;
+}
+
+function matchPlayLabel(round, teamId, course = courseFor(round)) {
+  const result = calculateMatchPlayResult(round, teamId, course);
+  return result.result === "—" ? "—" : `${result.holesWon}-${result.holesLost}`;
+}
+
 function teamHasScores(round, teamId) {
   return Object.keys(round.scoresByHole?.[teamId] || {}).length > 0;
 }
 
 function displayScoringTotal(round, teamId, course = courseFor(round)) {
-  return teamHasScores(round, teamId) ? calculateScoringTotal(round, teamId, course) : "—";
+  if (!teamHasScores(round, teamId)) return "—";
+  if (isMatchPlay(round)) return matchPlayLabel(round, teamId, course);
+  return calculateScoringTotal(round, teamId, course);
 }
 
 export function calculateRoundWinner(round, course = courseFor(round)) {
   if (round.status !== STATES.COMPLETE) return [];
+  if (isMatchPlay(round)) {
+    return playableTeams(round)
+      .filter((team) => calculateMatchPlayResult(round, team.id, course).result === "Win")
+      .map((team) => team.id);
+  }
   const mode = gameModeFor(round);
   const totals = playableTeams(round).map((team) => ({ teamId: team.id, total: calculateScoringTotal(round, team.id, course) }));
   if (!totals.length) return [];
@@ -287,18 +332,26 @@ function calculatePlayerPointBreakdown(round, playerId, points = DEFAULT_POINTS,
   if (!playerTeam) return empty;
   const winners = calculateRoundWinner(round, course);
   const teamCount = playableTeams(round).length;
-  const tiedWin = winners.length > 1 && winners.includes(playerTeam.id);
   const breakdown = { ...empty };
 
-  if (tiedWin) {
-    breakdown.resultPoints = points.tie;
-    breakdown.result = "Tie";
-  } else if (winners.includes(playerTeam.id)) {
-    breakdown.resultPoints = points.win;
-    breakdown.result = "Win";
-  } else if (teamCount > 1) {
-    breakdown.resultPoints = points.loss;
-    breakdown.result = "Loss";
+  if (isMatchPlay(round)) {
+    const match = calculateMatchPlayResult(round, playerTeam.id, course);
+    breakdown.result = match.result;
+    if (match.result === "Win") breakdown.resultPoints = points.win;
+    else if (match.result === "Tie") breakdown.resultPoints = points.tie;
+    else if (match.result === "Loss") breakdown.resultPoints = points.loss;
+  } else {
+    const tiedWin = winners.length > 1 && winners.includes(playerTeam.id);
+    if (tiedWin) {
+      breakdown.resultPoints = points.tie;
+      breakdown.result = "Tie";
+    } else if (winners.includes(playerTeam.id)) {
+      breakdown.resultPoints = points.win;
+      breakdown.result = "Win";
+    } else if (teamCount > 1) {
+      breakdown.resultPoints = points.loss;
+      breakdown.result = "Loss";
+    }
   }
 
   breakdown.clutchPoints = round.clutchEnabled === false ? 0 : calculateClutchWinner(round) === playerTeam.id ? points.clutch : 0;
@@ -536,6 +589,7 @@ function renderRound() {
   const missingScores = round.teams.length * course.holes.length - scoredHoleCount(round, course);
   if (!complete) {
     if (playableTeams(round).length < 2) missing.push("2 " + scoringEntityName(round) + " required");
+    if (!hasValidMatchPairings(round)) missing.push("even player count for matches");
     if (missingScores > 0) missing.push(missingScores + " score" + (missingScores === 1 ? "" : "s"));
     if (!round.awards.longestDrivePlayerId) missing.push("LD not selected");
     if (!round.awards.nearestPinPlayerId) missing.push("NP not selected");
@@ -596,7 +650,7 @@ function renderScorecard(round, course, team) {
       <summary class="scorecard-head row">
         <div>
           <strong>${escapeHtml(teamLabel(team, round))}</strong>
-          <div class="tiny">${round.gameMode === "STABLEFORD" ? "Stableford points calculate from strokes" : teamShortLabel(team) + " · adjust with plus/minus"}</div>
+          <div class="tiny">${isMatchPlay(round) ? "vs " + escapeHtml(teamLabel(matchOpponent(round, team.id) || { playerIds: [] }, round)) : round.gameMode === "STABLEFORD" ? "Stableford points calculate from strokes" : teamShortLabel(team) + " · adjust with plus/minus"}</div>
         </div>
         <span class="pill">${displayScoringTotal(round, team.id, course)}</span>
       </summary>
@@ -742,7 +796,7 @@ function renderRoundSummary() {
                 <strong>${escapeHtml(teamLabel(team, round))}</strong>
                 <div class="tiny">${winner ? "Winning " + (isIndividualMode(round) ? "player" : "team") : gameModeFor(round).totalLabel}</div>
               </div>
-              <span class="pill">${calculateScoringTotal(round, team.id, course)}</span>
+              <span class="pill">${displayScoringTotal(round, team.id, course)}</span>
             </div>
           </article>
         `;
@@ -865,7 +919,7 @@ function renderRoundsSetup() {
               <select class="select" data-round-mode="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>
                 ${Object.entries(GAME_MODES).map(([id, mode]) => `<option value="${id}" ${round.gameMode === id ? "selected" : ""}>${mode.label}</option>`).join("")}
               </select>
-              <span class="tiny">${sourceLocked ? "Mode locks after scores or awards exist." : isIndividualMode(round) ? "Individual scorecards, one player per card." : "Team scorecards for scramble."}</span>
+              <span class="tiny">${sourceLocked ? "Mode locks after scores or awards exist." : isMatchPlay(round) ? "Pairings are Player 1 vs Player 2, Player 3 vs Player 4." : isIndividualMode(round) ? "Individual scorecards, one player per card." : "Team scorecards for scramble."}</span>
             </label>
             <div class="row wrap">
               <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
@@ -877,6 +931,7 @@ function renderRoundsSetup() {
               <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked ? "disabled" : ""} /></label>
             </div>
             <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>${isIndividualMode(round) ? "Add player card" : "Add team"}</button></div>
+            ${isMatchPlay(round) && !hasValidMatchPairings(round) ? `<div class="warning setup-warning">Match play needs an even number of player cards.</div>` : ""}
             <div class="section-header"><h2>${isIndividualMode(round) ? "Players" : "Teams"}</h2><span class="tiny">${round.teams.length} ${isIndividualMode(round) ? "scorecards" : "teams"}</span></div>
             <div class="stack">
               ${round.teams.map((team, teamIndex) => h`
@@ -1123,7 +1178,7 @@ function updateRoundCourse(roundId, courseId) {
 }
 
 function buildDefaultTeamsForMode(modeId, players) {
-  if (GAME_MODES[modeId]?.scoring === "player") {
+  if (["player", "match"].includes(GAME_MODES[modeId]?.scoring)) {
     return players.map((player) => ({ id: uid("team"), playerIds: [player.id] }));
   }
   const midpoint = Math.ceil(players.length / 2);
