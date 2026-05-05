@@ -648,6 +648,14 @@ function playerDeleteLabel(playerId) {
   return "Remove";
 }
 
+function normalizeHandicapInput(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const handicap = Number(raw.replace(",", "."));
+  if (!Number.isFinite(handicap)) return "";
+  return Math.max(-10, Math.min(54, Math.round(handicap * 10) / 10));
+}
+
 function courseHasSourceData(courseId) {
   return tripRounds().some((round) => round.courseId === courseId && roundHasSourceData(round));
 }
@@ -1051,8 +1059,12 @@ function renderPlayersAdmin() {
           <div class="list-row player-row">
             <div>
               <strong>${escapeHtml(player.name)}</strong>
-              <span>HCP ${player.handicap || "-"}</span>
+              <span>Player profile</span>
             </div>
+            <label class="hcp-control">
+              <span>HCP</span>
+              <input data-player-hcp="${player.id}" value="${escapeHtml(player.handicap)}" inputmode="decimal" aria-label="Handicap for ${escapeHtml(player.name)}" placeholder="-" />
+            </label>
             <button class="danger-btn ${pendingDeletePlayerId === player.id ? "confirming" : ""}" data-remove-player="${player.id}">${playerDeleteLabel(player.id)}</button>
           </div>
         `).join("") || `<div class="empty">No players yet.</div>`}
@@ -1364,6 +1376,7 @@ function bindEvents(app) {
   app.querySelectorAll("[data-scoring-round]").forEach((button) => button.addEventListener("click", () => { pendingDeleteRoundId = ""; scoringRoundId = button.dataset.scoringRound; render(); }));
   app.querySelectorAll("[data-select-player]").forEach((button) => button.addEventListener("click", () => { selectedPlayerId = button.dataset.selectPlayer; render(); }));
   app.querySelectorAll("[data-add-player]").forEach((form) => form.addEventListener("submit", addPlayer));
+  app.querySelectorAll("[data-player-hcp]").forEach((input) => input.addEventListener("change", () => updatePlayerHandicap(input.dataset.playerHcp, input.value)));
   app.querySelectorAll("[data-remove-player]").forEach((button) => button.addEventListener("click", () => removePlayer(button.dataset.removePlayer)));
   app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
   app.querySelectorAll("[data-add-course]").forEach((form) => form.addEventListener("submit", addCourse));
@@ -1599,8 +1612,18 @@ function addPlayer(event) {
   const name = String(data.get("name") || "").trim();
   if (!name) return;
   mutate((next) => {
-    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: Number(data.get("handicap")) || "", active: true });
+    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: normalizeHandicapInput(data.get("handicap")), active: true });
   }, `Added player ${name}`);
+}
+
+function updatePlayerHandicap(playerId, value) {
+  const handicap = normalizeHandicapInput(value);
+  mutate((next) => {
+    const player = next.players.find((item) => item.id === playerId && item.tripId === next.session.tripId);
+    if (!player || !canAdmin()) return;
+    player.handicap = handicap;
+    notice = `${player.name}'s handicap updated.`;
+  }, "Updated player handicap");
 }
 
 function removePlayer(playerId) {

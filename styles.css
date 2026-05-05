@@ -201,6 +201,21 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .player-row > div:first-child span {
   text-align: left;
 }
+.hcp-control {
+  display: grid;
+  gap: 4px;
+  min-width: 74px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+.hcp-control span { text-align: left; }
+.hcp-control input {
+  width: 74px;
+  min-height: 40px;
+  padding: 7px 9px;
+  text-align: center;
+}
 .role-control {
   display: grid;
   gap: 4px;
