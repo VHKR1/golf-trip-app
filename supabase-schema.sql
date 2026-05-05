@@ -27,6 +27,7 @@ create table players (
   trip_id uuid not null references trips(id) on delete cascade,
   name text not null,
   handicap numeric,
+  player_pin text,
   active boolean not null default true
 );
 
@@ -364,6 +365,16 @@ create index if not exists idx_round_entry_players_player_id on round_entry_play
 create index if not exists idx_scores_round_entry_id on scores(round_entry_id);
 create index if not exists idx_awards_round_id on awards(round_id);
 create index if not exists idx_awards_player_id on awards(player_id);
+
+alter table players add column if not exists player_pin text;
+update players
+set player_pin = lpad((floor(random() * 9000) + 1000)::int::text, 4, '0')
+where player_pin is null or player_pin = '';
+alter table players
+  drop constraint if exists players_player_pin_format_check;
+alter table players
+  add constraint players_player_pin_format_check
+  check (player_pin is null or player_pin ~ '^[0-9]{4,6}$');
 
 drop policy if exists "members can read trips" on trips;
 drop policy if exists "owners can update trips" on trips;
@@ -708,6 +719,68 @@ grant execute on function private.claim_player_profile(uuid) to authenticated;
 grant execute on function public.join_trip_by_invite(text) to authenticated;
 grant execute on function public.claim_player_profile(uuid) to authenticated;
 
+create or replace function private.can_create_first_trip()
+returns boolean
+language sql
+security definer
+set search_path = public, private
+as $$
+  select not exists (select 1 from trips);
+$$;
+
+create or replace function public.can_create_first_trip()
+returns boolean
+language sql
+security invoker
+set search_path = public, private
+as $$
+  select private.can_create_first_trip();
+$$;
+
+revoke all on function private.can_create_first_trip() from public;
+revoke all on function public.can_create_first_trip() from public;
+grant execute on function public.can_create_first_trip() to authenticated;
+
+create or replace function private.verify_guest_player_pin(invite_code_input text, player_id_input uuid, player_pin_input text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, private
+as $$
+declare
+  matches_pin boolean;
+begin
+  select exists (
+    select 1
+    from players p
+    join trips t on t.id = p.trip_id
+    where p.id = player_id_input
+      and p.active = true
+      and upper(t.invite_code) = upper(trim(invite_code_input))
+      and p.player_pin = regexp_replace(coalesce(player_pin_input, ''), '\D', '', 'g')
+  ) into matches_pin;
+
+  if not matches_pin then
+    raise exception 'Player PIN did not match';
+  end if;
+
+  return true;
+end;
+$$;
+
+create or replace function public.verify_guest_player_pin(invite_code_input text, player_id_input uuid, player_pin_input text)
+returns boolean
+language sql
+security invoker
+set search_path = public, private
+as $$
+  select private.verify_guest_player_pin(invite_code_input, player_id_input, player_pin_input);
+$$;
+
+revoke all on function private.verify_guest_player_pin(text, uuid, text) from public;
+revoke all on function public.verify_guest_player_pin(text, uuid, text) from public;
+grant execute on function public.verify_guest_player_pin(text, uuid, text) to anon, authenticated;
+
 create or replace function private.trip_snapshot_by_invite(invite_code_input text)
 returns jsonb
 language plpgsql
@@ -729,7 +802,7 @@ begin
 
   select jsonb_build_object(
     'trip', to_jsonb(t),
-    'players', coalesce((select jsonb_agg(to_jsonb(p) order by p.name) from players p where p.trip_id = target_trip_id and p.active = true), '[]'::jsonb),
+    'players', coalesce((select jsonb_agg(jsonb_build_object('id', p.id, 'trip_id', p.trip_id, 'name', p.name, 'handicap', p.handicap, 'active', p.active) order by p.name) from players p where p.trip_id = target_trip_id and p.active = true), '[]'::jsonb),
     'courses', coalesce((select jsonb_agg(to_jsonb(c) order by c.name) from courses c where c.trip_id = target_trip_id), '[]'::jsonb),
     'course_holes', coalesce((select jsonb_agg(to_jsonb(ch) order by ch.course_id, ch.hole_number) from course_holes ch join courses c on c.id = ch.course_id where c.trip_id = target_trip_id), '[]'::jsonb),
     'rounds', coalesce((select jsonb_agg(to_jsonb(r) order by r.updated_at, r.name) from rounds r where r.trip_id = target_trip_id), '[]'::jsonb),
@@ -745,7 +818,7 @@ begin
 end;
 $$;
 
-create or replace function private.save_guest_scorecard(invite_code_input text, player_id_input uuid, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
+create or replace function private.save_guest_scorecard(invite_code_input text, player_id_input uuid, player_pin_input text, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
 returns jsonb
 language plpgsql
 security definer
@@ -766,6 +839,8 @@ begin
   if target_trip_id is null then
     raise exception 'Invite code not found';
   end if;
+
+  perform private.verify_guest_player_pin(invite_code_input, player_id_input, player_pin_input);
 
   select re.round_id into target_round_id
   from round_entries re
@@ -829,20 +904,24 @@ as $$
   select private.trip_snapshot_by_invite(invite_code_input);
 $$;
 
-create or replace function public.save_guest_scorecard(invite_code_input text, player_id_input uuid, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
+create or replace function public.save_guest_scorecard(invite_code_input text, player_id_input uuid, player_pin_input text, entry_id_input uuid, score_rows jsonb, submit_input boolean default false)
 returns jsonb
 language sql
 security invoker
 set search_path = public, private
 as $$
-  select private.save_guest_scorecard(invite_code_input, player_id_input, entry_id_input, score_rows, submit_input);
+  select private.save_guest_scorecard(invite_code_input, player_id_input, player_pin_input, entry_id_input, score_rows, submit_input);
 $$;
 
 revoke all on function private.trip_snapshot_by_invite(text) from public;
 revoke all on function private.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) from public;
+revoke all on function private.save_guest_scorecard(text, uuid, text, uuid, jsonb, boolean) from public;
 revoke all on function public.trip_snapshot_by_invite(text) from public;
 revoke all on function public.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) from public;
+revoke all on function public.save_guest_scorecard(text, uuid, text, uuid, jsonb, boolean) from public;
+drop function if exists public.save_guest_scorecard(text, uuid, uuid, jsonb, boolean);
+drop function if exists private.save_guest_scorecard(text, uuid, uuid, jsonb, boolean);
 grant execute on function public.trip_snapshot_by_invite(text) to anon, authenticated;
-grant execute on function public.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) to anon, authenticated;
+grant execute on function public.save_guest_scorecard(text, uuid, text, uuid, jsonb, boolean) to anon, authenticated;
 grant execute on function private.trip_snapshot_by_invite(text) to anon, authenticated;
-grant execute on function private.save_guest_scorecard(text, uuid, uuid, jsonb, boolean) to anon, authenticated;
+grant execute on function private.save_guest_scorecard(text, uuid, text, uuid, jsonb, boolean) to anon, authenticated;

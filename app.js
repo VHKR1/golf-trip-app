@@ -76,6 +76,7 @@ function createDemoDatabase() {
       tripId,
       name: ["Victor", "Alex", "Sam", "Jamie", "Chris", "Taylor"][index],
       handicap: [13, 8, 18, 11, 21, 15][index],
+      pin: ["1342", "2819", "4428", "7610", "9051", "3374"][index],
       active: true,
     })),
     courses: [
@@ -120,7 +121,14 @@ function normalizeDatabase(input) {
     users: Array.isArray(db.users) ? db.users : demo.users,
     trips: Array.isArray(db.trips) && (allowEmpty || db.trips.length) ? db.trips : demo.trips,
     memberships: Array.isArray(db.memberships) ? db.memberships : demo.memberships,
-    players: Array.isArray(db.players) && (allowEmpty || db.players.length) ? db.players : demo.players,
+    players: (Array.isArray(db.players) && (allowEmpty || db.players.length) ? db.players : demo.players).map((player) => ({
+      id: player.id || uid("player"),
+      tripId: player.tripId || tripId,
+      name: player.name || "Player",
+      handicap: player.handicap ?? "",
+      pin: normalizePlayerPin(player.pin || player.playerPin || ""),
+      active: player.active !== false,
+    })),
     courses: (Array.isArray(db.courses) && (allowEmpty || db.courses.length) ? db.courses : demo.courses).map((course) => ({
       id: course.id || uid("course"),
       tripId: course.tripId || tripId,
@@ -161,6 +169,7 @@ function normalizeDatabase(input) {
     scores: Array.isArray(db.scores) ? db.scores.map((score) => ({ id: score.id || uid("score"), roundEntryId: score.roundEntryId, holeNumber: Math.max(1, Math.min(18, Number(score.holeNumber) || 1)), strokes: Math.max(1, Math.min(12, Number(score.strokes) || 1)), updatedAt: score.updatedAt || nowIso() })) : [],
     awards: Array.isArray(db.awards) ? db.awards.map((award) => ({ id: award.id || uid("award"), roundId: award.roundId, type: award.type, playerId: award.playerId || "" })) : [],
     auditLog: Array.isArray(db.auditLog) ? db.auditLog : [],
+    canCreateOwnerTrip: db.canCreateOwnerTrip === true,
   };
 }
 
@@ -203,7 +212,7 @@ function snakeMembership(row) {
 }
 
 function snakePlayer(row) {
-  return { id: row.id, tripId: row.trip_id, name: row.name, handicap: row.handicap ?? "", active: row.active !== false };
+  return { id: row.id, tripId: row.trip_id, name: row.name, handicap: row.handicap ?? "", pin: row.player_pin || "", active: row.active !== false };
 }
 
 function snakeRound(row) {
@@ -313,7 +322,9 @@ class SupabaseDatabaseAdapter {
   }
 
   async createOwnerTrip(user) {
-    const tripId = crypto.randomUUID();
+    const allowed = await this.canCreateFirstTrip();
+    if (!allowed) throw new Error("This app already has a trip. Ask the owner to use player access or add you as an admin.");
+    const tripId = uid();
     const inviteCode = `GOLF-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const { error: tripError } = await this.client
       .from("trips")
@@ -339,13 +350,27 @@ class SupabaseDatabaseAdapter {
     return tripId;
   }
 
+  async canCreateFirstTrip() {
+    const { data, error } = await this.client.rpc("can_create_first_trip");
+    if (error) throw error;
+    return data === true;
+  }
+
   async loadRemote() {
     const user = await this.authUser();
     if (!user) return this.load();
 
     let { data: memberships, error: membershipError } = await this.client.from("trip_memberships").select("*");
     if (membershipError) throw membershipError;
-    if (!memberships.length) return normalizeDatabase({ remote: true, session: { userId: user.id, tripId: "", view: "admin", activeRoundId: "" }, users: [rowUser(user)], trips: [], memberships: [], players: [], courses: [], rounds: [], roundEntries: [], roundEntryPlayers: [], scores: [], awards: [] });
+    if (!memberships.length) {
+      let canCreateOwnerTrip = false;
+      try {
+        canCreateOwnerTrip = await this.canCreateFirstTrip();
+      } catch (error) {
+        console.warn("Owner setup check failed.", error);
+      }
+      return normalizeDatabase({ remote: true, canCreateOwnerTrip, session: { userId: user.id, tripId: "", view: "admin", activeRoundId: "" }, users: [rowUser(user)], trips: [], memberships: [], players: [], courses: [], rounds: [], roundEntries: [], roundEntryPlayers: [], scores: [], awards: [] });
+    }
 
     const activeTripId = localStorage.getItem(ACTIVE_TRIP_KEY);
     const tripId = memberships.some((item) => item.trip_id === activeTripId) ? activeTripId : memberships[0].trip_id;
@@ -426,7 +451,7 @@ class SupabaseDatabaseAdapter {
 
     await this.upsertRows("trips", [{ id: trip.id, name: trip.name, invite_code: trip.inviteCode, created_by: trip.createdBy || user.id, created_at: trip.createdAt || nowIso() }]);
     await this.upsertRows("trip_memberships", nextDb.memberships.filter((item) => item.tripId === trip.id).map((item) => ({ id: item.id, trip_id: item.tripId, user_id: item.userId, role: item.role, player_id: item.playerId || null })));
-    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
+    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, player_pin: normalizePlayerPin(player.pin), active: player.active !== false })));
     await this.upsertRows("courses", nextDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
     await this.upsertRows("course_holes", nextDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
     const roundIds = nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => round.id);
@@ -495,9 +520,17 @@ class SupabaseDatabaseAdapter {
     if (error) throw error;
   }
 
-  async loadGuest(inviteCode, playerId = "") {
+  async loadGuest(inviteCode, playerId = "", playerPin = "") {
     const { data, error } = await this.client.rpc("trip_snapshot_by_invite", { invite_code_input: inviteCode });
     if (error) throw error;
+    if (playerId) {
+      const { error: claimError } = await this.client.rpc("verify_guest_player_pin", {
+        invite_code_input: inviteCode,
+        player_id_input: playerId,
+        player_pin_input: normalizePlayerPin(playerPin),
+      });
+      if (claimError) throw claimError;
+    }
     return databaseFromSnapshot(data, {
       userId: playerId ? `guest_${playerId}` : "guest",
       user: { id: playerId ? `guest_${playerId}` : "guest", name: playerId ? "Guest player" : "Guest", email: "" },
@@ -519,6 +552,7 @@ class SupabaseDatabaseAdapter {
       const { data, error } = await this.client.rpc("save_guest_scorecard", {
         invite_code_input: guest.inviteCode,
         player_id_input: guest.playerId,
+        player_pin_input: normalizePlayerPin(guest.playerPin),
         entry_id_input: entryId,
         score_rows: scoreRows,
         submit_input: Boolean(entry?.submittedAt),
@@ -602,10 +636,13 @@ function entryPlayerIds(entry) {
 
 function playerCanEditEntry(round, entry, playerId = currentMembership().playerId) {
   if (!playerId || round.locked || entry.approvedAt) return false;
-  if (canAdmin()) return true;
   const ids = entryPlayerIds(entry);
   if (round.gameMode === "SCRAMBLE") return entry.scorerPlayerId === playerId;
   return ids.includes(playerId) || entry.scorerPlayerId === playerId;
+}
+
+function adminCanEditEntry(round, entry) {
+  return canAdmin() && !round.locked && !entry.approvedAt;
 }
 
 function entryReviewState(entry) {
@@ -656,12 +693,30 @@ function normalizeHandicapInput(value) {
   return Math.max(-10, Math.min(54, Math.round(handicap * 10) / 10));
 }
 
+function normalizePlayerPin(value) {
+  return String(value ?? "").replace(/\D/g, "").slice(0, 6);
+}
+
+function generatePlayerPin() {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
 function courseHasSourceData(courseId) {
   return tripRounds().some((round) => round.courseId === courseId && roundHasSourceData(round));
 }
 
 function tripPlayers(tripId = currentTrip().id) {
   return db.players.filter((player) => player.tripId === tripId && player.active);
+}
+
+function leaderboardPlayers(tripId = currentTrip().id) {
+  const completedRoundIds = tripRounds(tripId).filter((round) => round.status === ROUND_STATES.COMPLETE).map((round) => round.id);
+  const completedEntryIds = db.roundEntries.filter((entry) => completedRoundIds.includes(entry.roundId)).map((entry) => entry.id);
+  const historicalPlayerIds = new Set([
+    ...db.roundEntryPlayers.filter((item) => completedEntryIds.includes(item.roundEntryId)).map((item) => item.playerId),
+    ...db.awards.filter((award) => completedRoundIds.includes(award.roundId)).map((award) => award.playerId),
+  ].filter(Boolean));
+  return db.players.filter((player) => player.tripId === tripId && (player.active || historicalPlayerIds.has(player.id)));
 }
 
 function tripRounds(tripId = currentTrip().id) {
@@ -833,7 +888,7 @@ function playerBreakdown(round, playerId) {
 
 function leaderboard() {
   const completed = tripRounds().filter((round) => round.status === ROUND_STATES.COMPLETE);
-  const rows = tripPlayers().map((player) => {
+  const rows = leaderboardPlayers().map((player) => {
     const rounds = completed.map((round) => playerBreakdown(round, player.id));
     return {
       playerId: player.id,
@@ -962,14 +1017,17 @@ function bindAuthEvents(app) {
 }
 
 function renderOwnerSetup() {
+  const canCreate = db.canCreateOwnerTrip === true;
   return h`
     <main class="main auth-shell">
       <section class="card auth-card">
-        <p class="eyebrow">Owner setup</p>
-        <h1>Create the trip</h1>
-        <p>You are signed in as ${escapeHtml(authUser?.email || "owner")}. Create the shared trip once, then players join with the access code.</p>
+        <p class="eyebrow">${canCreate ? "Owner setup" : "Admin access"}</p>
+        <h1>${canCreate ? "Create the trip" : "No admin access"}</h1>
+        <p>${canCreate
+          ? `You are signed in as ${escapeHtml(authUser?.email || "owner")}. Create the shared trip once, then players join with the access code.`
+          : `You are signed in as ${escapeHtml(authUser?.email || "this email")}, but this email is not attached to the shared trip. Use player access or ask the owner to make you an admin.`}</p>
         ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
-        <button class="primary" data-create-owner-trip>Create shared trip</button>
+        ${canCreate ? `<button class="primary" data-create-owner-trip>Create shared trip</button>` : ""}
         <button class="secondary" data-sign-out>Sign out</button>
       </section>
     </main>
@@ -1046,6 +1104,7 @@ function renderAdmin() {
 
 function renderPlayersAdmin() {
   const players = tripPlayers();
+  const linkedPlayerId = currentMembership().playerId;
   return h`
     <section class="card">
       <div class="section-header"><h2>Players</h2><span>${players.length} active</span></div>
@@ -1065,6 +1124,11 @@ function renderPlayersAdmin() {
               <span>HCP</span>
               <input data-player-hcp="${player.id}" value="${escapeHtml(player.handicap)}" inputmode="decimal" aria-label="Handicap for ${escapeHtml(player.name)}" placeholder="-" />
             </label>
+            <label class="pin-control">
+              <span>PIN</span>
+              <input data-player-pin="${player.id}" value="${escapeHtml(player.pin)}" inputmode="numeric" aria-label="Access PIN for ${escapeHtml(player.name)}" placeholder="1234" />
+            </label>
+            <button class="secondary mini-action" data-link-me="${player.id}" ${linkedPlayerId === player.id ? "disabled" : ""}>${linkedPlayerId === player.id ? "Me" : "This is me"}</button>
             <button class="danger-btn ${pendingDeletePlayerId === player.id ? "confirming" : ""}" data-remove-player="${player.id}">${playerDeleteLabel(player.id)}</button>
           </div>
         `).join("") || `<div class="empty">No players yet.</div>`}
@@ -1236,7 +1300,7 @@ function renderAwardSelect(round, type, label) {
 function renderScorecard(round, entry, options = {}) {
   const course = courseFor(round);
   const total = round.gameMode === "MATCH_PLAY" ? matchResult(round, entry).label : entryTotal(round, entry);
-  const editable = options.editable ?? (canAdmin() || playerCanEditEntry(round, entry));
+  const editable = options.editable ?? (adminCanEditEntry(round, entry) || playerCanEditEntry(round, entry));
   const showSubmit = options.showSubmit && editable && !entry.approvedAt;
   const entryComplete = isEntryComplete(round, entry);
   return h`
@@ -1311,6 +1375,7 @@ function renderClaimProfile() {
           <option value="">Choose your name</option>
           ${tripPlayers().map((player) => `<option value="${player.id}" ${claimedIds.has(player.id) ? "disabled" : ""}>${escapeHtml(player.name)}${claimedIds.has(player.id) ? " · claimed" : ""}</option>`).join("")}
         </select>
+        ${guestSession ? `<input name="playerPin" placeholder="Player PIN" inputmode="numeric" autocomplete="one-time-code" required />` : ""}
         <button>Claim profile</button>
       </form>
     </section>
@@ -1377,6 +1442,8 @@ function bindEvents(app) {
   app.querySelectorAll("[data-select-player]").forEach((button) => button.addEventListener("click", () => { selectedPlayerId = button.dataset.selectPlayer; render(); }));
   app.querySelectorAll("[data-add-player]").forEach((form) => form.addEventListener("submit", addPlayer));
   app.querySelectorAll("[data-player-hcp]").forEach((input) => input.addEventListener("change", () => updatePlayerHandicap(input.dataset.playerHcp, input.value)));
+  app.querySelectorAll("[data-player-pin]").forEach((input) => input.addEventListener("change", () => updatePlayerPin(input.dataset.playerPin, input.value)));
+  app.querySelectorAll("[data-link-me]").forEach((button) => button.addEventListener("click", () => linkCurrentUserToPlayer(button.dataset.linkMe)));
   app.querySelectorAll("[data-remove-player]").forEach((button) => button.addEventListener("click", () => removePlayer(button.dataset.removePlayer)));
   app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
   app.querySelectorAll("[data-add-course]").forEach((form) => form.addEventListener("submit", addCourse));
@@ -1520,10 +1587,12 @@ async function joinTripRemote(inviteCode) {
 function claimPlayer(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const playerId = String(new FormData(form).get("playerId") || "");
+  const formData = new FormData(form);
+  const playerId = String(formData.get("playerId") || "");
+  const playerPin = normalizePlayerPin(formData.get("playerPin"));
   if (!playerId) return;
   if (SUPABASE_ENABLED && guestSession) {
-    claimGuestPlayer(playerId);
+    claimGuestPlayer(playerId, playerPin);
     return;
   }
   if (SUPABASE_ENABLED) {
@@ -1543,11 +1612,13 @@ function claimPlayer(event) {
   }, "Claimed player profile");
 }
 
-async function claimGuestPlayer(playerId) {
+async function claimGuestPlayer(playerId, playerPin) {
   try {
-    guestSession = { ...guestSession, playerId };
+    if (playerPin.length < 4) throw new Error("Enter the player PIN from the trip admin.");
+    const nextGuestSession = { ...guestSession, playerId, playerPin };
+    db = await adapter.loadGuest(nextGuestSession.inviteCode, playerId, playerPin);
+    guestSession = nextGuestSession;
     localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
-    db = await adapter.loadGuest(guestSession.inviteCode, playerId);
     db.session.view = "player";
     notice = "Profile selected. Your scorecards are ready when assigned.";
   } catch (error) {
@@ -1612,7 +1683,7 @@ function addPlayer(event) {
   const name = String(data.get("name") || "").trim();
   if (!name) return;
   mutate((next) => {
-    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: normalizeHandicapInput(data.get("handicap")), active: true });
+    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: normalizeHandicapInput(data.get("handicap")), pin: generatePlayerPin(), active: true });
   }, `Added player ${name}`);
 }
 
@@ -1624,6 +1695,36 @@ function updatePlayerHandicap(playerId, value) {
     player.handicap = handicap;
     notice = `${player.name}'s handicap updated.`;
   }, "Updated player handicap");
+}
+
+function updatePlayerPin(playerId, value) {
+  const pin = normalizePlayerPin(value);
+  if (pin.length < 4) {
+    notice = "Player PIN must be 4 to 6 numbers.";
+    render();
+    return;
+  }
+  mutate((next) => {
+    const player = next.players.find((item) => item.id === playerId && item.tripId === next.session.tripId);
+    if (!player || !canAdmin()) return;
+    player.pin = pin;
+    notice = `${player.name}'s player PIN updated.`;
+  }, "Updated player PIN");
+}
+
+function linkCurrentUserToPlayer(playerId) {
+  mutate((next) => {
+    const membership = next.memberships.find((item) => item.tripId === next.session.tripId && item.userId === next.session.userId);
+    const player = next.players.find((item) => item.id === playerId && item.tripId === next.session.tripId);
+    if (!membership || !player || !canAdmin()) return;
+    const alreadyLinked = next.memberships.some((item) => item.tripId === next.session.tripId && item.playerId === playerId && item.userId !== next.session.userId);
+    if (alreadyLinked) {
+      notice = "That player profile is already linked to another account.";
+      return;
+    }
+    membership.playerId = playerId;
+    notice = `${player.name} is now linked to your admin account.`;
+  }, "Linked admin to player");
 }
 
 function removePlayer(playerId) {
@@ -1776,7 +1877,7 @@ function changeScore(payload) {
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
     const entry = next.roundEntries.find((item) => item.id === entryId);
-    if (!round || !entry || round.locked || !playerCanEditEntry(round, entry)) return;
+    if (!round || !entry || (!adminCanEditEntry(round, entry) && !playerCanEditEntry(round, entry))) return;
     entry.submittedBy = "";
     entry.submittedAt = "";
     entry.approvedBy = "";
@@ -1863,7 +1964,7 @@ function submitEntry(payload) {
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
     const entry = next.roundEntries.find((item) => item.id === entryId);
-    if (!round || !entry || !playerCanEditEntry(round, entry) || !isEntryComplete(round, entry)) return;
+    if (!round || !entry || (!adminCanEditEntry(round, entry) && !playerCanEditEntry(round, entry)) || !isEntryComplete(round, entry)) return;
     entry.submittedBy = next.session.userId;
     entry.submittedAt = nowIso();
     entry.approvedBy = "";
@@ -1917,7 +2018,11 @@ async function initializeApp() {
   try {
     authUser = await adapter.authUser();
     if (!authUser && guestSession?.inviteCode) {
-      db = await adapter.loadGuest(guestSession.inviteCode, guestSession.playerId || "");
+      if (guestSession.playerId && !guestSession.playerPin) {
+        guestSession = { inviteCode: guestSession.inviteCode, playerId: "" };
+        localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
+      }
+      db = await adapter.loadGuest(guestSession.inviteCode, guestSession.playerId || "", guestSession.playerPin || "");
       scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
     } else if (authUser) {
       db = await adapter.loadRemote();

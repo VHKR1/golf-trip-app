@@ -201,7 +201,8 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .player-row > div:first-child span {
   text-align: left;
 }
-.hcp-control {
+.hcp-control,
+.pin-control {
   display: grid;
   gap: 4px;
   min-width: 74px;
@@ -209,12 +210,18 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   font-size: 0.72rem;
   font-weight: 850;
 }
-.hcp-control span { text-align: left; }
-.hcp-control input {
+.hcp-control span,
+.pin-control span { text-align: left; }
+.hcp-control input,
+.pin-control input {
   width: 74px;
   min-height: 40px;
   padding: 7px 9px;
   text-align: center;
+}
+.mini-action {
+  min-width: 88px;
+  padding: 8px 10px;
 }
 .role-control {
   display: grid;
