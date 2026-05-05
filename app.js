@@ -540,6 +540,7 @@ let pendingDeleteRoundId = "";
 let authUser = null;
 let booting = SUPABASE_ENABLED;
 let authEmailSent = "";
+let showAdminSignin = false;
 let guestSession = (() => {
   try {
     return JSON.parse(localStorage.getItem(GUEST_ACCESS_KEY) || "null");
@@ -900,13 +901,20 @@ function renderAuthScreen() {
       </section>
       <section class="card auth-card secondary-auth">
         <p class="eyebrow">Owner only</p>
-        <h2>Admin sign in</h2>
-        <p>Use this only for the trip owner or admins.</p>
-        ${authEmailSent ? `<section class="notice">Magic link sent to ${escapeHtml(authEmailSent)}. Open it on this device to continue.</section>` : ""}
-        <form class="join-form" data-magic-link>
-          <input name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
-          <button class="primary">Send magic link</button>
-        </form>
+        ${showAdminSignin || authEmailSent
+          ? h`
+            <h2>Admin sign in</h2>
+            <p>Use this only for the trip owner or admins.</p>
+            ${authEmailSent ? `<section class="notice">Magic link sent to ${escapeHtml(authEmailSent)}. Open it on this device to continue.</section>` : ""}
+            <form class="join-form" data-magic-link>
+              <input name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
+              <button class="primary">Send magic link</button>
+            </form>
+            <button class="quiet-button" data-hide-admin-signin>Back to player access</button>
+          `
+          : h`
+            <button class="quiet-button admin-reveal" data-show-admin-signin>Admin sign in</button>
+          `}
       </section>
     </main>
   `;
@@ -915,6 +923,8 @@ function renderAuthScreen() {
 function bindAuthEvents(app) {
   app.querySelectorAll("[data-magic-link]").forEach((form) => form.addEventListener("submit", sendMagicLink));
   app.querySelectorAll("[data-guest-access]").forEach((form) => form.addEventListener("submit", guestAccess));
+  app.querySelectorAll("[data-show-admin-signin]").forEach((button) => button.addEventListener("click", () => { showAdminSignin = true; render(); }));
+  app.querySelectorAll("[data-hide-admin-signin]").forEach((button) => button.addEventListener("click", () => { showAdminSignin = false; authEmailSent = ""; render(); }));
 }
 
 function renderOwnerSetup() {

@@ -87,6 +87,16 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   background: #fbfaf6;
   box-shadow: none;
 }
+.quiet-button {
+  min-height: 44px;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--green);
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.admin-reveal { justify-self: center; }
 
 .hero-panel {
   padding: 22px 18px;
