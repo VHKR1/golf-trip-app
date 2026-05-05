@@ -72,6 +72,22 @@ function normalizeData(data) {
     courses: Array.isArray(data.courses) ? data.courses : [],
     rounds: Array.isArray(data.rounds) ? data.rounds : [],
   };
+  clean.courses = clean.courses.map((course, courseIndex) => {
+    const fallback = defaultCourse();
+    const sourceHoles = Array.isArray(course?.holes) ? course.holes : [];
+    const holes = fallback.holes.map((fallbackHole, index) => {
+      const sourceHole = sourceHoles.find((hole) => Number(hole?.holeNumber) === fallbackHole.holeNumber) || sourceHoles[index] || {};
+      return {
+        holeNumber: fallbackHole.holeNumber,
+        par: Math.max(3, Math.min(6, Number(sourceHole.par) || fallbackHole.par)),
+      };
+    });
+    return {
+      id: course?.id || uid("course"),
+      name: course?.name || `Course ${courseIndex + 1}`,
+      holes,
+    };
+  });
   if (!clean.courses.length) clean.courses.push(defaultCourse());
   clean.players = clean.players.map((player) => ({
     id: player.id || uid("player"),
@@ -204,21 +220,29 @@ function playerIsUsed(playerId, data = state) {
   });
 }
 
+function courseHasSourceData(courseId, data = state) {
+  return data.rounds.some((round) => round.courseId === courseId && roundHasSourceData(round));
+}
+
 function teamScore(round, teamId, holeNumber) {
   return round.scoresByHole?.[teamId]?.[holeNumber] ?? "";
 }
 
 function scoredHoleCount(round, course) {
-  return playableTeams(round).reduce((count, team) => {
-    return count + course.holes.filter((hole) => teamScore(round, team.id, hole.holeNumber) !== "").length;
+  return scoringTeams(round).reduce((count, team) => {
+    return count + course.holes.filter((hole) => team.playerIds.length > 0 && teamScore(round, team.id, hole.holeNumber) !== "").length;
   }, 0);
 }
 
 function expectedScoreCount(round, course) {
-  return playableTeams(round).length * course.holes.length;
+  return scoringTeams(round).length * course.holes.length;
 }
 function playableTeams(round) {
   return round.teams.filter((team) => team.playerIds.length > 0);
+}
+
+function scoringTeams(round) {
+  return isMatchPlay(round) ? round.teams : playableTeams(round);
 }
 
 function scoringEntityName(round) {
@@ -226,7 +250,7 @@ function scoringEntityName(round) {
 }
 
 function hasValidMatchPairings(round) {
-  return !isMatchPlay(round) || playableTeams(round).length % 2 === 0;
+  return !isMatchPlay(round) || (round.teams.length >= 2 && round.teams.length % 2 === 0 && round.teams.every((team) => team.playerIds.length > 0));
 }
 
 function roundPlayerIds(round) {
@@ -278,10 +302,11 @@ function calculateScoringTotal(round, teamId, course = courseFor(round)) {
 }
 
 function matchOpponent(round, teamId) {
-  const teams = playableTeams(round);
+  const teams = scoringTeams(round);
   const index = teams.findIndex((team) => team.id === teamId);
   if (index < 0) return null;
-  return teams[index % 2 === 0 ? index + 1 : index - 1] || null;
+  const opponent = teams[index % 2 === 0 ? index + 1 : index - 1] || null;
+  return opponent?.playerIds.length ? opponent : null;
 }
 
 function calculateMatchPlayResult(round, teamId, course = courseFor(round)) {
@@ -339,7 +364,7 @@ export function calculateRoundWinner(round, course = courseFor(round)) {
 export function calculateClutchWinner(round) {
   if (round.status !== STATES.COMPLETE || round.clutchEnabled === false) return "";
   const hole = String(round.clutchHole);
-  const scores = round.teams
+  const scores = playableTeams(round)
     .map((team) => ({ teamId: team.id, score: Number(round.scoresByHole?.[team.id]?.[hole]) }))
     .filter((entry) => Number.isFinite(entry.score));
   const low = Math.min(...scores.map((entry) => entry.score));
@@ -622,7 +647,7 @@ function renderRound() {
   const missingScores = expectedScoreCount(round, course) - scoredHoleCount(round, course);
   if (!complete) {
     if (playableTeams(round).length < 2) missing.push("2 " + scoringEntityName(round) + " required");
-    if (!hasValidMatchPairings(round)) missing.push("even player count for matches");
+    if (!hasValidMatchPairings(round)) missing.push("complete match pairings");
     if (missingScores > 0) missing.push(missingScores + " score" + (missingScores === 1 ? "" : "s"));
     if (!round.awards.longestDrivePlayerId) missing.push("LD not selected");
     if (!round.awards.nearestPinPlayerId) missing.push("NP not selected");
@@ -640,7 +665,7 @@ function renderRound() {
     ${missing.length ? `<section class="section card warning">Missing ${missing.join(" · ")}.</section>` : ""}
     ${renderRoundScoreSummary(round)}
     <section class="section stack">
-      ${playableTeams(round).map((team) => renderScorecard(round, course, team)).join("") || `<div class="card warning">Assign players in Setup before entering scores.</div>`}
+      ${scoringTeams(round).filter((team) => team.playerIds.length > 0).map((team) => renderScorecard(round, course, team)).join("") || `<div class="card warning">Assign players in Setup before entering scores.</div>`}
     </section>
     <section class="section card">
       <div class="section-header"><h2>Awards</h2><span class="tiny">Bonus points</span></div>
@@ -810,9 +835,11 @@ function renderRoundSummary() {
   const round = state.rounds.find((item) => item.id === activeRoundId && item.status === STATES.COMPLETE) || state.rounds.find((item) => item.status === STATES.COMPLETE);
   if (!round) return `<section class="card">Complete a round to see a summary.</section>`;
   const course = courseFor(round);
+  const teams = playableTeams(round);
   const winners = calculateRoundWinner(round, course);
   const clutchTeamId = calculateClutchWinner(round);
-  const playerIds = [...new Set(round.teams.flatMap((team) => team.playerIds))];
+  const clutchTeam = teams.find((team) => team.id === clutchTeamId);
+  const playerIds = [...new Set(teams.flatMap((team) => team.playerIds))];
   return h`
     <section class="hero-panel summary-hero">
       <p class="tiny">Round complete</p>
@@ -820,7 +847,7 @@ function renderRoundSummary() {
       <p>${escapeHtml(course.name)} · ${gameModeFor(round).label}</p>
     </section>
     <section class="section stack">
-      ${round.teams.map((team) => {
+      ${teams.map((team) => {
         const winner = winners.includes(team.id);
         return h`
           <article class="card summary-team ${winner ? "summary-winner" : ""}">
@@ -840,7 +867,7 @@ function renderRoundSummary() {
       <div class="round-points">
         <span>LD: ${escapeHtml(playerName(round.awards.longestDrivePlayerId))}</span>
         <span>NP: ${escapeHtml(playerName(round.awards.nearestPinPlayerId))}</span>
-        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeamId ? escapeHtml(teamLabel(round.teams.find((team) => team.id === clutchTeamId), round)) : "No winner"}</span>`}
+        ${round.clutchEnabled === false ? "" : `<span>Clutch: ${clutchTeam ? escapeHtml(teamLabel(clutchTeam, round)) : "No winner"}</span>`}
       </div>
     </section>
     <section class="section card point-breakdown">
@@ -856,6 +883,72 @@ function renderRoundSummary() {
       <button class="secondary" data-open-round="${round.id}">Edit Round</button>
       <button class="primary" data-go="leaderboard">View Leaderboard</button>
     </section>
+  `;
+}
+
+
+function renderTeamSetupBlock(round, team, teamIndex, disabled) {
+  return h`
+    <div class="team-block">
+      <div class="row">
+        <strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong>
+        <button class="ghost" data-remove-team="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>Remove</button>
+      </div>
+      <div class="team-picker">
+        ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${disabled ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderMatchPlayerOptions(team, round) {
+  const selectedId = team.playerIds[0] || "";
+  const assignedToOtherCard = new Set(round.teams
+    .filter((item) => item.id !== team.id)
+    .flatMap((item) => item.playerIds));
+  return [
+    `<option value="">Select player</option>`,
+    ...state.players
+      .filter((player) => player.active || player.id === selectedId)
+      .map((player) => {
+        const assigned = assignedToOtherCard.has(player.id);
+        const label = `${player.name}${player.active ? "" : " (inactive)"}${assigned ? " · currently in another match" : ""}`;
+        return `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }),
+  ].join("");
+}
+
+function renderMatchPairingsSetup(round, disabled) {
+  const pairs = [];
+  for (let index = 0; index < scoringTeams(round).length; index += 2) {
+    pairs.push(scoringTeams(round).slice(index, index + 2));
+  }
+  return h`
+    <div class="match-pair-grid">
+      ${pairs.map((pair, pairIndex) => {
+        const [first, second] = pair;
+        return h`
+          <div class="match-pair-card">
+            <div class="match-pair-head">
+              <strong>Match ${pairIndex + 1}</strong>
+              <span>${escapeHtml(teamLabel(first, round))} vs ${second ? escapeHtml(teamLabel(second, round)) : "Needs opponent"}</span>
+            </div>
+            ${pair.map((team, offset) => h`
+              <div class="match-slot">
+                <label class="field">
+                  <span>Player ${offset === 0 ? "A" : "B"}</span>
+                  <select class="select" data-set-team-player="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>
+                    ${renderMatchPlayerOptions(team, round)}
+                  </select>
+                </label>
+                <button class="ghost" data-remove-team="${round.id}|${team.id}" ${disabled ? "disabled" : ""}>Remove</button>
+              </div>
+            `).join("")}
+            ${second ? "" : `<div class="warning setup-warning">Add one more player card to complete this match.</div>`}
+          </div>
+        `;
+      }).join("")}
+    </div>
   `;
 }
 
@@ -915,18 +1008,22 @@ function renderCoursesSetup() {
   return h`
     <div class="stack">
       <button class="primary" data-add-course>Add course</button>
-      ${state.courses.map((course) => h`
-        <article class="card form-grid">
-          <label class="field"><span>Course name</span><input class="input" value="${escapeHtml(course.name)}" data-course-name="${course.id}" /></label>
-          <div class="pars-grid">
-            ${course.holes.map((hole) => h`
-              <label class="hole-par tiny">H${hole.holeNumber}
-                <input class="input" inputmode="numeric" value="${hole.par}" data-par="${course.id}|${hole.holeNumber}" />
-              </label>
-            `).join("")}
-          </div>
-        </article>
-      `).join("")}
+      ${state.courses.map((course) => {
+        const used = courseHasSourceData(course.id);
+        return h`
+          <article class="card form-grid">
+            <label class="field"><span>Course name</span><input class="input" value="${escapeHtml(course.name)}" data-course-name="${course.id}" /></label>
+            ${used ? `<div class="warning setup-warning">Pars are locked because this course has recorded round data.</div>` : ""}
+            <div class="pars-grid">
+              ${course.holes.map((hole) => h`
+                <label class="hole-par tiny">H${hole.holeNumber}
+                  <input class="input" inputmode="numeric" value="${hole.par}" data-par="${course.id}|${hole.holeNumber}" ${used ? "disabled" : ""} />
+                </label>
+              `).join("")}
+            </div>
+          </article>
+        `;
+      }).join("")}
     </div>
   `;
 }
@@ -967,14 +1064,9 @@ function renderRoundsSetup() {
             ${isMatchPlay(round) && !hasValidMatchPairings(round) ? `<div class="warning setup-warning">Match play needs an even number of player cards.</div>` : ""}
             <div class="section-header"><h2>${isIndividualMode(round) ? "Players" : "Teams"}</h2><span class="tiny">${round.teams.length} ${isIndividualMode(round) ? "scorecards" : "teams"}</span></div>
             <div class="stack">
-              ${round.teams.map((team, teamIndex) => h`
-                <div class="team-block">
-                  <div class="row"><strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked || sourceLocked ? "disabled" : ""}>Remove</button></div>
-                  <div class="team-picker">
-                    ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked || sourceLocked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
-                  </div>
-                </div>
-              `).join("")}
+              ${isMatchPlay(round)
+                ? renderMatchPairingsSetup(round, locked || sourceLocked)
+                : round.teams.map((team, teamIndex) => renderTeamSetupBlock(round, team, teamIndex, locked || sourceLocked)).join("")}
             </div>
           </article>
         `;
@@ -1016,6 +1108,7 @@ function bindEvents(app) {
   app.querySelectorAll("[data-add-team]").forEach((button) => button.addEventListener("click", () => addTeam(button.dataset.addTeam)));
   app.querySelectorAll("[data-remove-team]").forEach((button) => button.addEventListener("click", () => removeTeam(button.dataset.removeTeam)));
   app.querySelectorAll("[data-toggle-team-player]").forEach((button) => button.addEventListener("click", () => toggleTeamPlayer(button.dataset.toggleTeamPlayer)));
+  app.querySelectorAll("[data-set-team-player]").forEach((select) => select.addEventListener("change", () => setTeamPlayer(select.dataset.setTeamPlayer, select.value)));
   app.querySelectorAll("[data-leaderboard-round]").forEach((select) => select.addEventListener("change", () => { leaderboardRoundId = select.value; selectedLeaderboardPlayerId = ""; render(); }));
   app.querySelectorAll("[data-export-image]").forEach((button) => button.addEventListener("click", exportLeaderboardImage));
   app.querySelectorAll("[data-leader-player]").forEach((button) => button.addEventListener("click", () => { selectedLeaderboardPlayerId = button.dataset.leaderPlayer; render(); }));
@@ -1139,6 +1232,7 @@ function updateCourseName(courseId, name) {
 function updatePar(payload, value) {
   const [courseId, holeNumber] = payload.split("|");
   setState((draft) => {
+    if (courseHasSourceData(courseId, draft)) return;
     const course = draft.courses.find((item) => item.id === courseId);
     const hole = course?.holes.find((item) => item.holeNumber === Number(holeNumber));
     if (hole) hole.par = Math.max(3, Math.min(6, Number(value) || hole.par));
@@ -1287,16 +1381,37 @@ function toggleTeamPlayer(payload) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
     if (!round || round.locked || roundHasSourceData(round)) return;
-    round.teams.forEach((team) => {
-      team.playerIds = team.playerIds.filter((id) => id !== playerId);
-    });
     const team = round.teams.find((item) => item.id === teamId);
-    if (team) team.playerIds = isIndividualMode(round) ? [playerId] : [...team.playerIds, playerId];
+    if (!team) return;
+    const alreadySelected = team.playerIds.includes(playerId);
+    round.teams.forEach((item) => {
+      item.playerIds = item.playerIds.filter((id) => id !== playerId);
+    });
+    if (!alreadySelected) team.playerIds = isIndividualMode(round) ? [playerId] : [...team.playerIds, playerId];
     cleanRoundAwards(round);
     syncRoundStatus(draft, roundId);
   });
 }
 
+
+function setTeamPlayer(payload, playerId) {
+  const [roundId, teamId] = payload.split("|");
+  setState((draft) => {
+    const round = draft.rounds.find((item) => item.id === roundId);
+    if (!round || round.locked || roundHasSourceData(round)) return;
+    const team = round.teams.find((item) => item.id === teamId);
+    if (!team) return;
+    team.playerIds = [];
+    if (playerId) {
+      round.teams.forEach((item) => {
+        if (item.id !== teamId) item.playerIds = item.playerIds.filter((id) => id !== playerId);
+      });
+      team.playerIds = [playerId];
+    }
+    cleanRoundAwards(round);
+    syncRoundStatus(draft, roundId);
+  });
+}
 
 function downloadFile(filename, content, type) {
   const blob = new Blob([content], { type });

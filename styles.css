@@ -486,6 +486,42 @@ input:disabled {
   border-top: 1px solid var(--line);
 }
 
+.match-pair-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.match-pair-card {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffaf0;
+}
+
+.match-pair-head {
+  display: grid;
+  gap: 3px;
+}
+
+.match-pair-head span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 850;
+}
+
+.match-slot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.match-slot .ghost {
+  min-width: 86px;
+}
+
 .pars-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
