@@ -78,23 +78,48 @@ function normalizeData(data) {
     name: player.name || "Player",
     active: player.active !== false,
   }));
-  clean.rounds = clean.rounds.map((round) => ({
-    id: round.id || uid("round"),
-    name: round.name || "Round",
-    gameMode: GAME_MODES[round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode] ? (round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode) : "SCRAMBLE",
-    courseId: round.courseId || clean.courses[0].id,
-    teams: Array.isArray(round.teams) ? round.teams : [],
-    scoresByHole: round.scoresByHole || {},
-    awards: round.awards || { longestDrivePlayerId: "", nearestPinPlayerId: "" },
-    clutchHole: Number(round.clutchHole) || 18,
-    clutchEnabled: round.clutchEnabled !== false,
-    longestDriveHole: Number(round.longestDriveHole) || 9,
-    nearestPinHole: Number(round.nearestPinHole) || 12,
-    notes: round.notes || "",
-    status: Object.values(STATES).includes(round.status) ? round.status : STATES.NOT_STARTED,
-    locked: Boolean(round.locked),
-    updatedAt: round.updatedAt || todayIso(),
-  }));
+  clean.rounds = clean.rounds.map((round) => {
+    const teams = Array.isArray(round.teams)
+      ? round.teams.map((team) => ({
+        id: team?.id || uid("team"),
+        playerIds: Array.isArray(team?.playerIds) ? team.playerIds.filter((id) => typeof id === "string") : [],
+      }))
+      : [];
+    const teamIds = new Set(teams.map((team) => team.id));
+    const scoresByHole = {};
+    if (round.scoresByHole && typeof round.scoresByHole === "object") {
+      Object.entries(round.scoresByHole).forEach(([teamId, scores]) => {
+        if (!teamIds.has(teamId) || !scores || typeof scores !== "object") return;
+        const cleanScores = {};
+        Object.entries(scores).forEach(([holeNumber, value]) => {
+          const hole = Math.max(1, Math.min(18, Number(holeNumber) || 0));
+          const score = Math.max(1, Math.min(12, Number(value) || 0));
+          if (hole && score) cleanScores[hole] = score;
+        });
+        scoresByHole[teamId] = cleanScores;
+      });
+    }
+    return {
+      id: round.id || uid("round"),
+      name: round.name || "Round",
+      gameMode: GAME_MODES[round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode] ? (round.gameMode === "STROKE_PLAY" ? "MATCH_PLAY" : round.gameMode) : "SCRAMBLE",
+      courseId: round.courseId || clean.courses[0].id,
+      teams,
+      scoresByHole,
+      awards: {
+        longestDrivePlayerId: round.awards?.longestDrivePlayerId || "",
+        nearestPinPlayerId: round.awards?.nearestPinPlayerId || "",
+      },
+      clutchHole: Number(round.clutchHole) || 18,
+      clutchEnabled: round.clutchEnabled !== false,
+      longestDriveHole: Number(round.longestDriveHole) || 9,
+      nearestPinHole: Number(round.nearestPinHole) || 12,
+      notes: round.notes || "",
+      status: Object.values(STATES).includes(round.status) ? round.status : STATES.NOT_STARTED,
+      locked: Boolean(round.locked),
+      updatedAt: round.updatedAt || todayIso(),
+    };
+  });
   return clean;
 }
 
@@ -184,11 +209,14 @@ function teamScore(round, teamId, holeNumber) {
 }
 
 function scoredHoleCount(round, course) {
-  return round.teams.reduce((count, team) => {
+  return playableTeams(round).reduce((count, team) => {
     return count + course.holes.filter((hole) => teamScore(round, team.id, hole.holeNumber) !== "").length;
   }, 0);
 }
 
+function expectedScoreCount(round, course) {
+  return playableTeams(round).length * course.holes.length;
+}
 function playableTeams(round) {
   return round.teams.filter((team) => team.playerIds.length > 0);
 }
@@ -214,7 +242,7 @@ function cleanRoundAwards(round) {
 function isRoundComplete(round, course) {
   const scoringGroups = playableTeams(round);
   const hasEnoughGroups = scoringGroups.length >= 2 && hasValidMatchPairings(round);
-  const allScored = hasEnoughGroups && scoredHoleCount(round, course) === round.teams.length * course.holes.length;
+  const allScored = hasEnoughGroups && scoredHoleCount(round, course) === expectedScoreCount(round, course);
   return Boolean(allScored && round.awards.longestDrivePlayerId && round.awards.nearestPinPlayerId);
 }
 
@@ -551,7 +579,7 @@ function renderDashboard() {
         ${state.rounds.map((round) => {
           const course = courseFor(round);
           const status = derivedRoundStatus(round, course);
-          const completeText = `${scoredHoleCount(round, course)} / ${round.teams.length * course.holes.length} scores`;
+          const completeText = `${scoredHoleCount(round, course)} / ${expectedScoreCount(round, course)} scores`;
           return h`
             <article class="card round-item">
               <div class="row">
@@ -572,9 +600,9 @@ function renderDashboard() {
 function renderRoundScoreSummary(round) {
   const course = courseFor(round);
   const mode = gameModeFor(round);
-  const teams = round.teams.map((team) => ({ team, total: calculateScoringTotal(round, team.id, course) }));
+  const teams = playableTeams(round).map((team) => ({ team, total: calculateScoringTotal(round, team.id, course) }));
   const entered = scoredHoleCount(round, course);
-  const expected = round.teams.length * course.holes.length;
+  const expected = expectedScoreCount(round, course);
   return h`
     <section class="section card score-summary">
       <div class="section-header"><h2>Round totals</h2><span class="tiny">${mode.totalLabel} · ${entered} / ${expected} scores entered</span></div>
@@ -591,7 +619,7 @@ function renderRound() {
   const course = courseFor(round);
   const complete = isRoundComplete(round, course);
   const missing = [];
-  const missingScores = round.teams.length * course.holes.length - scoredHoleCount(round, course);
+  const missingScores = expectedScoreCount(round, course) - scoredHoleCount(round, course);
   if (!complete) {
     if (playableTeams(round).length < 2) missing.push("2 " + scoringEntityName(round) + " required");
     if (!hasValidMatchPairings(round)) missing.push("even player count for matches");
@@ -612,7 +640,7 @@ function renderRound() {
     ${missing.length ? `<section class="section card warning">Missing ${missing.join(" · ")}.</section>` : ""}
     ${renderRoundScoreSummary(round)}
     <section class="section stack">
-      ${round.teams.map((team) => renderScorecard(round, course, team)).join("")}
+      ${playableTeams(round).map((team) => renderScorecard(round, course, team)).join("") || `<div class="card warning">Assign players in Setup before entering scores.</div>`}
     </section>
     <section class="section card">
       <div class="section-header"><h2>Awards</h2><span class="tiny">Bonus points</span></div>
@@ -643,12 +671,12 @@ function renderRound() {
 
 function renderPlayerOptions(selectedId = "", round = null) {
   const allowedIds = round ? roundPlayerIds(round) : null;
-  return activePlayers()
-    .filter((player) => !allowedIds || allowedIds.has(player.id))
-    .map((player) => `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(player.name)}</option>`)
+  return state.players
+    .filter((player) => !allowedIds || allowedIds.has(player.id) || player.id === selectedId)
+    .filter((player) => player.active || allowedIds?.has(player.id) || player.id === selectedId)
+    .map((player) => `<option value="${player.id}" ${player.id === selectedId ? "selected" : ""}>${escapeHtml(player.name)}${player.active ? "" : " (inactive)"}</option>`)
     .join("");
 }
-
 function renderScorecard(round, course, team) {
   return h`
     <details class="card scorecard" open>
@@ -916,7 +944,7 @@ function renderRoundsSetup() {
             ${locked ? `<div class="warning setup-warning">Round is locked. Unlock it on the round screen before editing setup.</div>` : ""}
             <label class="field"><span>Round name</span><input class="input" value="${escapeHtml(round.name)}" data-round-name="${round.id}" ${locked ? "disabled" : ""} /></label>
             <label class="field"><span>Course</span>
-              <select class="select" data-round-course="${round.id}" ${locked ? "disabled" : ""}>
+              <select class="select" data-round-course="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>
                 ${state.courses.map((course) => `<option value="${course.id}" ${course.id === round.courseId ? "selected" : ""}>${escapeHtml(course.name)}</option>`).join("")}
               </select>
             </label>
@@ -927,23 +955,23 @@ function renderRoundsSetup() {
               <span class="tiny">${sourceLocked ? "Mode locks after scores or awards exist." : isMatchPlay(round) ? "Pairings are Player 1 vs Player 2, Player 3 vs Player 4." : isIndividualMode(round) ? "Individual scorecards, one player per card." : "Team scorecards for scramble."}</span>
             </label>
             <div class="row wrap">
-              <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
+              <button class="chip ${round.clutchEnabled === false ? "" : "selected"}" data-toggle-clutch="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>${round.clutchEnabled === false ? "Clutch off" : "Clutch on"}</button>
               <span class="tiny">When off, no clutch bonus is awarded for this round.</span>
             </div>
             <div class="three-col">
-              <label class="field"><span>Clutch hole</span><input class="input" inputmode="numeric" value="${round.clutchHole}" data-round-hole="${round.id}|clutchHole" ${locked || round.clutchEnabled === false ? "disabled" : ""} /></label>
-              <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked ? "disabled" : ""} /></label>
-              <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked ? "disabled" : ""} /></label>
+              <label class="field"><span>Clutch hole</span><input class="input" inputmode="numeric" value="${round.clutchHole}" data-round-hole="${round.id}|clutchHole" ${locked || sourceLocked || round.clutchEnabled === false ? "disabled" : ""} /></label>
+              <label class="field"><span>Longest Drive hole</span><input class="input" inputmode="numeric" value="${round.longestDriveHole}" data-round-hole="${round.id}|longestDriveHole" ${locked || sourceLocked ? "disabled" : ""} /></label>
+              <label class="field"><span>Nearest Pin hole</span><input class="input" inputmode="numeric" value="${round.nearestPinHole}" data-round-hole="${round.id}|nearestPinHole" ${locked || sourceLocked ? "disabled" : ""} /></label>
             </div>
-            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked ? "disabled" : ""}>${isIndividualMode(round) ? "Add player card" : "Add team"}</button></div>
+            <div class="button-grid"><button class="secondary" data-duplicate-round="${round.id}">Duplicate this round</button><button class="secondary" data-add-team="${round.id}" ${locked || sourceLocked ? "disabled" : ""}>${isIndividualMode(round) ? "Add player card" : "Add team"}</button></div>
             ${isMatchPlay(round) && !hasValidMatchPairings(round) ? `<div class="warning setup-warning">Match play needs an even number of player cards.</div>` : ""}
             <div class="section-header"><h2>${isIndividualMode(round) ? "Players" : "Teams"}</h2><span class="tiny">${round.teams.length} ${isIndividualMode(round) ? "scorecards" : "teams"}</span></div>
             <div class="stack">
               ${round.teams.map((team, teamIndex) => h`
                 <div class="team-block">
-                  <div class="row"><strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked ? "disabled" : ""}>Remove</button></div>
+                  <div class="row"><strong>${isIndividualMode(round) ? "Player" : "Team"} ${teamIndex + 1} · ${escapeHtml(isIndividualMode(round) ? teamLabel(team, round) : teamShortLabel(team))}</strong><button class="ghost" data-remove-team="${round.id}|${team.id}" ${locked || sourceLocked ? "disabled" : ""}>Remove</button></div>
                   <div class="team-picker">
-                    ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
+                    ${activePlayers().map((player) => `<button class="chip ${team.playerIds.includes(player.id) ? "selected" : ""}" data-toggle-team-player="${round.id}|${team.id}|${player.id}" ${locked || sourceLocked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}
                   </div>
                 </div>
               `).join("")}
@@ -1175,7 +1203,7 @@ function updateRoundName(roundId, name) {
 function updateRoundCourse(roundId, courseId) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked) {
+    if (round && !round.locked && !roundHasSourceData(round)) {
       round.courseId = courseId;
       syncRoundStatus(draft, roundId);
     }
@@ -1220,14 +1248,14 @@ function updateRoundHole(payload, value) {
   const [roundId, key] = payload.split("|");
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (round && !round.locked) round[key] = Math.max(1, Math.min(18, Number(value) || round[key]));
+    if (round && !round.locked && !roundHasSourceData(round)) round[key] = Math.max(1, Math.min(18, Number(value) || round[key]));
   });
 }
 
 function toggleClutch(roundId) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceData(round)) return;
     round.clutchEnabled = round.clutchEnabled === false;
     round.updatedAt = todayIso();
   });
@@ -1236,7 +1264,7 @@ function toggleClutch(roundId) {
 function addTeam(roundId) {
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceData(round)) return;
     round.teams.push({ id: uid("team"), playerIds: [] });
     syncRoundStatus(draft, roundId);
   });
@@ -1246,7 +1274,7 @@ function removeTeam(payload) {
   const [roundId, teamId] = payload.split("|");
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceData(round)) return;
     round.teams = round.teams.filter((team) => team.id !== teamId);
     delete round.scoresByHole[teamId];
     cleanRoundAwards(round);
@@ -1258,7 +1286,7 @@ function toggleTeamPlayer(payload) {
   const [roundId, teamId, playerId] = payload.split("|");
   setState((draft) => {
     const round = draft.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceData(round)) return;
     round.teams.forEach((team) => {
       team.playerIds = team.playerIds.filter((id) => id !== playerId);
     });
@@ -1327,6 +1355,16 @@ function exportLeaderboardImage() {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
 
+  const fitText = (text, maxWidth) => {
+    const value = String(text || "");
+    if (ctx.measureText(value).width <= maxWidth) return value;
+    let next = value;
+    while (next.length > 1 && ctx.measureText(next + "…").width > maxWidth) {
+      next = next.slice(0, -1);
+    }
+    return next + "…";
+  };
+
   const roundRect = (x, y, w, h, r) => {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -1352,7 +1390,7 @@ function exportLeaderboardImage() {
   ctx.font = "800 52px system-ui";
   ctx.fillText("Golf Trip Leaderboard", width / 2, 98);
   ctx.font = "700 30px system-ui";
-  ctx.fillText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width / 2, 148);
+  ctx.fillText(fitText(`${leaders.map((row) => row.name).join(" / ") || "No leader"} · ${leaders[0]?.points || 0} pts`, width - 160), width / 2, 148);
   ctx.font = "600 22px system-ui";
   ctx.fillStyle = "rgba(255, 255, 255, 0.74)";
   ctx.fillText(exportLabel + " · " + completedRounds.length + " completed round" + (completedRounds.length === 1 ? "" : "s"), width / 2, 178);
@@ -1377,13 +1415,13 @@ function exportLeaderboardImage() {
     ctx.textAlign = "left";
     ctx.fillStyle = "#16201d";
     ctx.font = "800 30px system-ui";
-    ctx.fillText(row.name, x + 190, y + 33);
+    ctx.fillText(fitText(row.name, w - 330), x + 190, y + 33);
 
     ctx.fillStyle = "#6a746f";
     ctx.font = "700 18px system-ui";
     const detail = [`LD ${row.longestDrivePoints}`, `NP ${row.nearestPinPoints}`];
     if (clutchActive) detail.push(`Clutch ${row.clutchPoints}`);
-    ctx.fillText(detail.join("   "), x + 190, y + 58);
+    ctx.fillText(fitText(detail.join("   "), w - 330), x + 190, y + 58);
 
     ctx.textAlign = "right";
     ctx.fillStyle = "#16392f";
