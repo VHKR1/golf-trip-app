@@ -34,7 +34,12 @@ const GAME_MODES = {
   STABLEFORD: { label: "Stableford", scoring: "player", higherWins: true, totalLabel: "Points" },
 };
 
-const uid = (prefix) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+const uid = () => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (character) =>
+    (Number(character) ^ (((globalThis.crypto?.getRandomValues?.(new Uint8Array(1))[0]) || Math.floor(Math.random() * 256)) & (15 >> (Number(character) / 4)))).toString(16)
+  );
+};
 const nowIso = () => new Date().toISOString();
 
 const defaultPars = [4, 4, 3, 5, 4, 4, 3, 5, 4, 4, 3, 4, 5, 4, 4, 3, 5, 4];
@@ -537,6 +542,7 @@ let scoringRoundId = db.session.activeRoundId || "";
 let notice = "";
 let adminTab = "players";
 let pendingDeleteRoundId = "";
+let pendingDeletePlayerId = "";
 let authUser = null;
 let booting = SUPABASE_ENABLED;
 let authEmailSent = "";
@@ -619,6 +625,26 @@ function roundHasSourceData(round) {
 function roundDeleteLabel(round) {
   if (round.locked) return "Locked";
   if (pendingDeleteRoundId === round.id) return "Confirm";
+  return "Remove";
+}
+
+function playerHasHistoricalData(playerId) {
+  const entryIds = db.roundEntryPlayers
+    .filter((item) => item.playerId === playerId)
+    .map((item) => item.roundEntryId);
+  const roundsWithPlayer = db.roundEntries
+    .filter((entry) => entryIds.includes(entry.id) || entry.scorerPlayerId === playerId)
+    .map((entry) => db.rounds.find((round) => round.id === entry.roundId))
+    .filter(Boolean);
+  return (
+    db.scores.some((score) => entryIds.includes(score.roundEntryId)) ||
+    db.awards.some((award) => award.playerId === playerId) ||
+    roundsWithPlayer.some((round) => round.status !== ROUND_STATES.NOT_STARTED || round.locked)
+  );
+}
+
+function playerDeleteLabel(playerId) {
+  if (pendingDeletePlayerId === playerId) return "Confirm";
   return "Remove";
 }
 
@@ -1011,16 +1037,25 @@ function renderAdmin() {
 }
 
 function renderPlayersAdmin() {
+  const players = tripPlayers();
   return h`
     <section class="card">
-      <div class="section-header"><h2>Players</h2><span>${tripPlayers().length} active</span></div>
+      <div class="section-header"><h2>Players</h2><span>${players.length} active</span></div>
       <form class="inline-form" data-add-player>
         <input name="name" placeholder="Player name" required />
         <input name="handicap" placeholder="HCP" inputmode="numeric" />
         <button>Add</button>
       </form>
       <div class="list">
-        ${tripPlayers().map((player) => `<div class="list-row"><strong>${escapeHtml(player.name)}</strong><span>HCP ${player.handicap || "-"}</span></div>`).join("")}
+        ${players.map((player) => h`
+          <div class="list-row player-row">
+            <div>
+              <strong>${escapeHtml(player.name)}</strong>
+              <span>HCP ${player.handicap || "-"}</span>
+            </div>
+            <button class="danger-btn ${pendingDeletePlayerId === player.id ? "confirming" : ""}" data-remove-player="${player.id}">${playerDeleteLabel(player.id)}</button>
+          </div>
+        `).join("") || `<div class="empty">No players yet.</div>`}
       </div>
     </section>
   `;
@@ -1329,6 +1364,7 @@ function bindEvents(app) {
   app.querySelectorAll("[data-scoring-round]").forEach((button) => button.addEventListener("click", () => { pendingDeleteRoundId = ""; scoringRoundId = button.dataset.scoringRound; render(); }));
   app.querySelectorAll("[data-select-player]").forEach((button) => button.addEventListener("click", () => { selectedPlayerId = button.dataset.selectPlayer; render(); }));
   app.querySelectorAll("[data-add-player]").forEach((form) => form.addEventListener("submit", addPlayer));
+  app.querySelectorAll("[data-remove-player]").forEach((button) => button.addEventListener("click", () => removePlayer(button.dataset.removePlayer)));
   app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
   app.querySelectorAll("[data-add-course]").forEach((form) => form.addEventListener("submit", addCourse));
   app.querySelectorAll("[data-update-invite-code]").forEach((form) => form.addEventListener("submit", updateInviteCode));
@@ -1565,6 +1601,66 @@ function addPlayer(event) {
   mutate((next) => {
     next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: Number(data.get("handicap")) || "", active: true });
   }, `Added player ${name}`);
+}
+
+function removePlayer(playerId) {
+  const player = db.players.find((item) => item.id === playerId && item.tripId === db.session.tripId);
+  if (!player || !canAdmin()) return;
+  if (pendingDeletePlayerId !== playerId) {
+    pendingDeletePlayerId = playerId;
+    notice = playerHasHistoricalData(playerId)
+      ? "Tap Confirm to remove this player from future setup. Historical scores and awards will stay intact."
+      : "Tap Confirm to remove this player from the trip setup.";
+    render();
+    return;
+  }
+  pendingDeletePlayerId = "";
+  mutate((next) => {
+    const target = next.players.find((item) => item.id === playerId);
+    if (!target) return;
+    const entryIds = next.roundEntryPlayers
+      .filter((item) => item.playerId === playerId)
+      .map((item) => item.roundEntryId);
+    const dirtyRoundIds = new Set(next.rounds
+      .filter((round) => {
+        const roundEntryIds = next.roundEntries.filter((entry) => entry.roundId === round.id).map((entry) => entry.id);
+        return (
+          round.status !== ROUND_STATES.NOT_STARTED ||
+          round.locked ||
+          next.awards.some((award) => award.roundId === round.id) ||
+          next.roundEntries.some((entry) => entry.roundId === round.id && (entry.submittedAt || entry.approvedAt)) ||
+          next.scores.some((score) => roundEntryIds.includes(score.roundEntryId))
+        );
+      })
+      .map((round) => round.id));
+    const hasHistory =
+      next.scores.some((score) => entryIds.includes(score.roundEntryId)) ||
+      next.awards.some((award) => award.playerId === playerId) ||
+      next.roundEntries.some((entry) => (entryIds.includes(entry.id) || entry.scorerPlayerId === playerId) && (entry.submittedAt || entry.approvedAt)) ||
+      next.roundEntries.some((entry) => (entryIds.includes(entry.id) || entry.scorerPlayerId === playerId) && next.rounds.some((round) => round.id === entry.roundId && (round.status !== ROUND_STATES.NOT_STARTED || round.locked)));
+
+    target.active = false;
+    next.memberships = next.memberships.map((membership) => (
+      membership.tripId === next.session.tripId && membership.playerId === playerId && membership.role !== ROLES.OWNER
+        ? { ...membership, playerId: "" }
+        : membership
+    ));
+
+    next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => {
+      if (item.playerId !== playerId) return true;
+      const entry = next.roundEntries.find((roundEntry) => roundEntry.id === item.roundEntryId);
+      return entry ? dirtyRoundIds.has(entry.roundId) : hasHistory;
+    });
+    next.roundEntries = next.roundEntries.map((entry) => (
+      entry.scorerPlayerId === playerId && !dirtyRoundIds.has(entry.roundId)
+        ? { ...entry, scorerPlayerId: "", submittedBy: "", submittedAt: "", approvedBy: "", approvedAt: "" }
+        : entry
+    ));
+    next.awards = hasHistory ? next.awards : next.awards.filter((award) => award.playerId !== playerId);
+
+    if (selectedPlayerId === playerId) selectedPlayerId = "";
+    notice = hasHistory ? `${target.name} was archived for future rounds.` : `${target.name} was removed from setup.`;
+  }, `Removed player ${player.name}`);
 }
 
 function addCourse(event) {

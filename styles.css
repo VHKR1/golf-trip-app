@@ -193,6 +193,14 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   text-align: left;
   overflow-wrap: anywhere;
 }
+.player-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.player-row > div:first-child span {
+  text-align: left;
+}
 .role-control {
   display: grid;
   gap: 4px;
