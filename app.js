@@ -452,19 +452,77 @@ class SupabaseDatabaseAdapter {
     }
     const trip = nextDb.trips.find((item) => item.id === nextDb.session.tripId);
     if (!trip) return;
+    const saveDb = await this.withRemoteScorecardChanges(nextDb, trip.id);
 
     await this.upsertRows("trips", [{ id: trip.id, name: trip.name, invite_code: trip.inviteCode, created_by: trip.createdBy || user.id, created_at: trip.createdAt || nowIso() }]);
-    await this.upsertRows("trip_memberships", nextDb.memberships.filter((item) => item.tripId === trip.id).map((item) => ({ id: item.id, trip_id: item.tripId, user_id: item.userId, role: item.role, player_id: item.playerId || null })));
-    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
-    await this.upsertRows("courses", nextDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
-    await this.upsertRows("course_holes", nextDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
-    const roundIds = nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => round.id);
-    await this.syncChildTable("rounds", "trip_id", [trip.id], nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => ({ id: round.id, trip_id: round.tripId, course_id: round.courseId, name: round.name, game_mode: round.gameMode, clutch_enabled: round.clutchEnabled !== false, clutch_hole: round.clutchHole, longest_drive_hole: round.longestDriveHole, nearest_pin_hole: round.nearestPinHole, status: round.status, locked: round.locked, updated_at: round.updatedAt || nowIso() })));
-    await this.syncChildTable("round_entries", "round_id", roundIds, nextDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => ({ id: entry.id, round_id: entry.roundId, position: entry.position, scorer_player_id: entry.scorerPlayerId || null, submitted_by: entry.submittedBy || null, submitted_at: entry.submittedAt || null, approved_by: entry.approvedBy || null, approved_at: entry.approvedAt || null })));
-    const entryIds = nextDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => entry.id);
-    await this.syncChildTable("round_entry_players", "round_entry_id", entryIds, nextDb.roundEntryPlayers.filter((item) => entryIds.includes(item.roundEntryId)).map((item) => ({ id: item.id, round_entry_id: item.roundEntryId, player_id: item.playerId })));
-    await this.syncChildTable("scores", "round_entry_id", entryIds, nextDb.scores.filter((score) => entryIds.includes(score.roundEntryId)).map((score) => ({ id: score.id, round_entry_id: score.roundEntryId, hole_number: score.holeNumber, strokes: score.strokes, updated_at: score.updatedAt || nowIso() })));
-    await this.syncChildTable("awards", "round_id", roundIds, nextDb.awards.filter((award) => roundIds.includes(award.roundId)).map((award) => ({ id: award.id, round_id: award.roundId, type: award.type, player_id: award.playerId })));
+    await this.upsertRows("trip_memberships", saveDb.memberships.filter((item) => item.tripId === trip.id).map((item) => ({ id: item.id, trip_id: item.tripId, user_id: item.userId, role: item.role, player_id: item.playerId || null })));
+    await this.upsertRows("players", saveDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
+    await this.upsertRows("courses", saveDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
+    await this.upsertRows("course_holes", saveDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
+    const roundIds = saveDb.rounds.filter((round) => round.tripId === trip.id).map((round) => round.id);
+    await this.syncChildTable("rounds", "trip_id", [trip.id], saveDb.rounds.filter((round) => round.tripId === trip.id).map((round) => ({ id: round.id, trip_id: round.tripId, course_id: round.courseId, name: round.name, game_mode: round.gameMode, clutch_enabled: round.clutchEnabled !== false, clutch_hole: round.clutchHole, longest_drive_hole: round.longestDriveHole, nearest_pin_hole: round.nearestPinHole, status: round.status, locked: round.locked, updated_at: round.updatedAt || nowIso() })));
+    await this.syncChildTable("round_entries", "round_id", roundIds, saveDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => ({ id: entry.id, round_id: entry.roundId, position: entry.position, scorer_player_id: entry.scorerPlayerId || null, submitted_by: entry.submittedBy || null, submitted_at: entry.submittedAt || null, approved_by: entry.approvedBy || null, approved_at: entry.approvedAt || null })));
+    const entryIds = saveDb.roundEntries.filter((entry) => roundIds.includes(entry.roundId)).map((entry) => entry.id);
+    await this.syncChildTable("round_entry_players", "round_entry_id", entryIds, saveDb.roundEntryPlayers.filter((item) => entryIds.includes(item.roundEntryId)).map((item) => ({ id: item.id, round_entry_id: item.roundEntryId, player_id: item.playerId })));
+    await this.syncChildTable("scores", "round_entry_id", entryIds, saveDb.scores.filter((score) => entryIds.includes(score.roundEntryId)).map((score) => ({ id: score.id, round_entry_id: score.roundEntryId, hole_number: score.holeNumber, strokes: score.strokes, updated_at: score.updatedAt || nowIso() })));
+    await this.syncChildTable("awards", "round_id", roundIds, saveDb.awards.filter((award) => roundIds.includes(award.roundId)).map((award) => ({ id: award.id, round_id: award.roundId, type: award.type, player_id: award.playerId })));
+  }
+
+  async withRemoteScorecardChanges(nextDb, tripId) {
+    const roundIds = nextDb.rounds.filter((round) => round.tripId === tripId).map((round) => round.id);
+    if (!roundIds.length) return nextDb;
+    const { data: remoteEntries, error: entriesError } = await this.client.from("round_entries").select("*").in("round_id", roundIds);
+    if (entriesError) throw entriesError;
+    const remoteEntryIds = remoteEntries.map((entry) => entry.id);
+    if (!remoteEntryIds.length) return nextDb;
+    const [entryPlayersResult, scoresResult] = await Promise.all([
+      this.client.from("round_entry_players").select("*").in("round_entry_id", remoteEntryIds),
+      this.client.from("scores").select("*").in("round_entry_id", remoteEntryIds),
+    ]);
+    if (entryPlayersResult.error) throw entryPlayersResult.error;
+    if (scoresResult.error) throw scoresResult.error;
+
+    const protectedEntryIds = new Set([
+      ...remoteEntries.filter((entry) => entry.submitted_at || entry.approved_at).map((entry) => entry.id),
+      ...scoresResult.data.map((score) => score.round_entry_id),
+    ]);
+    if (!protectedEntryIds.size) return nextDb;
+
+    const merged = JSON.parse(JSON.stringify(nextDb));
+    remoteEntries.filter((entry) => protectedEntryIds.has(entry.id)).forEach((remoteEntry) => {
+      const localEntry = merged.roundEntries.find((entry) => entry.id === remoteEntry.id);
+      if (!localEntry) {
+        merged.roundEntries.push(snakeEntry(remoteEntry));
+        return;
+      }
+      if (remoteEntry.submitted_at && !localEntry.submittedAt) {
+        localEntry.submittedBy = remoteEntry.submitted_by || "";
+        localEntry.submittedAt = remoteEntry.submitted_at;
+      }
+      if (remoteEntry.approved_at && !localEntry.approvedAt) {
+        localEntry.approvedBy = remoteEntry.approved_by || "";
+        localEntry.approvedAt = remoteEntry.approved_at;
+      }
+    });
+
+    entryPlayersResult.data.filter((item) => protectedEntryIds.has(item.round_entry_id)).forEach((remotePlayer) => {
+      const exists = merged.roundEntryPlayers.some((item) => item.id === remotePlayer.id || (item.roundEntryId === remotePlayer.round_entry_id && item.playerId === remotePlayer.player_id));
+      if (!exists) merged.roundEntryPlayers.push(snakeEntryPlayer(remotePlayer));
+    });
+
+    scoresResult.data.forEach((remoteScore) => {
+      const localScore = merged.scores.find((score) => score.roundEntryId === remoteScore.round_entry_id && score.holeNumber === remoteScore.hole_number);
+      if (!localScore) {
+        merged.scores.push(snakeScore(remoteScore));
+        return;
+      }
+      if (new Date(remoteScore.updated_at || 0) > new Date(localScore.updatedAt || 0)) {
+        localScore.id = remoteScore.id;
+        localScore.strokes = remoteScore.strokes;
+        localScore.updatedAt = remoteScore.updated_at || nowIso();
+      }
+    });
+    return merged;
   }
 
   async savePlayerRemote(nextDb, membership) {
@@ -646,12 +704,23 @@ function entryReviewState(entry) {
   return "Open";
 }
 
-function roundHasSourceData(round) {
-  const entryIds = entriesFor(round).map((entry) => entry.id);
-  const hasScores = db.scores.some((score) => entryIds.includes(score.roundEntryId));
-  const hasSubmitted = entriesFor(round).some((entry) => entry.submittedAt || entry.approvedAt);
-  const hasAwards = db.awards.some((award) => award.roundId === round.id);
+function roundEntriesFor(source, round) {
+  return source.roundEntries
+    .filter((entry) => entry.roundId === round.id)
+    .sort((a, b) => a.position - b.position);
+}
+
+function roundHasSourceDataIn(source, round) {
+  const entries = roundEntriesFor(source, round);
+  const entryIds = entries.map((entry) => entry.id);
+  const hasScores = source.scores.some((score) => entryIds.includes(score.roundEntryId));
+  const hasSubmitted = entries.some((entry) => entry.submittedAt || entry.approvedAt);
+  const hasAwards = source.awards.some((award) => award.roundId === round.id);
   return hasScores || hasSubmitted || hasAwards || round.status !== ROUND_STATES.NOT_STARTED;
+}
+
+function roundHasSourceData(round) {
+  return roundHasSourceDataIn(db, round);
 }
 
 function roundDeleteLabel(round) {
@@ -719,9 +788,7 @@ function courseFor(round) {
 }
 
 function entriesFor(round) {
-  return db.roundEntries
-    .filter((entry) => entry.roundId === round.id)
-    .sort((a, b) => a.position - b.position);
+  return roundEntriesFor(db, round);
 }
 
 function playersForEntry(entry) {
@@ -1255,20 +1322,21 @@ function renderScoringAdmin(round) {
 function renderEntrySetup(round, entry) {
   const players = tripPlayers();
   const selected = playersForEntry(entry).map((player) => player.id);
+  const setupLocked = round.locked || roundHasSourceData(round);
   const title = round.gameMode === "MATCH_PLAY" ? `Match ${Math.floor(entry.position / 2) + 1} · Player ${entry.position % 2 === 0 ? "A" : "B"}` : round.gameMode === "SCRAMBLE" ? `Team ${entry.position + 1}` : `Player ${entry.position + 1}`;
   return h`
     <div class="entry-setup">
       <strong>${title}</strong>
       ${round.gameMode === "SCRAMBLE"
-        ? `<div class="chip-list">${players.map((player) => `<button class="chip ${selected.includes(player.id) ? "selected" : ""}" data-toggle-entry-player="${round.id}|${entry.id}|${player.id}" ${round.locked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}</div>`
-        : `<div class="slot-row"><select data-set-entry-player="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}><option value="">Select player</option>${players.map((player) => `<option value="${player.id}" ${selected.includes(player.id) ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}</select><button data-remove-entry="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}>Remove</button></div>`}
+        ? `<div class="chip-list">${players.map((player) => `<button class="chip ${selected.includes(player.id) ? "selected" : ""}" data-toggle-entry-player="${round.id}|${entry.id}|${player.id}" ${setupLocked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}</div>`
+        : `<div class="slot-row"><select data-set-entry-player="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}><option value="">Select player</option>${players.map((player) => `<option value="${player.id}" ${selected.includes(player.id) ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}</select><button data-remove-entry="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}>Remove</button></div>`}
       <label class="field"><span>Scorecard owner</span>
-        <select data-set-scorer="${round.id}|${entry.id}" ${round.locked ? "disabled" : ""}>
+        <select data-set-scorer="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}>
           <option value="">Admin only</option>
           ${players.filter((player) => selected.includes(player.id)).map((player) => `<option value="${player.id}" ${entry.scorerPlayerId === player.id ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}
         </select>
       </label>
-      <span class="review-note">${entryReviewState(entry)}${entry.scorerPlayerId ? ` · scorer ${escapeHtml(playerName(entry.scorerPlayerId))}` : " · admin scoring"}</span>
+      <span class="review-note">${entryReviewState(entry)}${entry.scorerPlayerId ? ` · scorer ${escapeHtml(playerName(entry.scorerPlayerId))}` : " · admin scoring"}${setupLocked && !round.locked ? " · setup locked after scoring" : ""}</span>
     </div>
   `;
 }
@@ -1899,7 +1967,7 @@ function toggleEntryPlayer(payload) {
   const [roundId, entryId, playerId] = payload.split("|");
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceDataIn(next, round)) return;
     const entryIds = next.roundEntries.filter((entry) => entry.roundId === roundId).map((entry) => entry.id);
     const selected = next.roundEntryPlayers.some((item) => item.roundEntryId === entryId && item.playerId === playerId);
     next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => {
@@ -1915,7 +1983,7 @@ function setEntryPlayer(payload, playerId) {
   const [roundId, entryId] = payload.split("|");
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceDataIn(next, round)) return;
     const entryIds = next.roundEntries.filter((entry) => entry.roundId === roundId).map((entry) => entry.id);
     next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => {
       if (!entryIds.includes(item.roundEntryId)) return true;
@@ -1931,7 +1999,7 @@ function setEntryScorer(payload, playerId) {
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
     const entry = next.roundEntries.find((item) => item.id === entryId);
-    if (!round || !entry || round.locked || !canAdmin()) return;
+    if (!round || !entry || round.locked || roundHasSourceDataIn(next, round) || !canAdmin()) return;
     entry.scorerPlayerId = playerId;
   }, "Changed scorecard owner");
 }
@@ -1964,7 +2032,7 @@ function removeEntry(payload) {
   const [roundId, entryId] = payload.split("|");
   mutate((next) => {
     const round = next.rounds.find((item) => item.id === roundId);
-    if (!round || round.locked) return;
+    if (!round || round.locked || roundHasSourceDataIn(next, round)) return;
     next.roundEntries = next.roundEntries.filter((entry) => entry.id !== entryId);
     next.roundEntryPlayers = next.roundEntryPlayers.filter((item) => item.roundEntryId !== entryId);
     next.scores = next.scores.filter((score) => score.roundEntryId !== entryId);

@@ -462,6 +462,10 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   gap: 8px;
 }
 
+.auth-card .join-form {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .invite-box {
   display: grid;
   gap: 4px;
@@ -537,6 +541,10 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 @media (min-width: 720px) {
   .join-form {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 150px auto;
+  }
+
+  .auth-card .join-form {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

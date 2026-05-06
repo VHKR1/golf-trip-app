@@ -449,7 +449,14 @@ create policy "authorized can update round entries" on round_entries for update 
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where rounds.id = round_entries.round_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
   )
 ) with check (
@@ -459,7 +466,14 @@ create policy "authorized can update round entries" on round_entries for update 
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where rounds.id = round_entries.round_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
   )
 );
@@ -528,7 +542,14 @@ create policy "authorized can insert scores" on scores for insert to authenticat
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where round_entries.id = scores.round_entry_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
       and round_entries.approved_at is null
   )
@@ -546,7 +567,14 @@ create policy "authorized can update scores" on scores for update to authenticat
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where round_entries.id = scores.round_entry_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
       and round_entries.approved_at is null
   )
@@ -563,7 +591,14 @@ create policy "authorized can update scores" on scores for update to authenticat
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where round_entries.id = scores.round_entry_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
       and round_entries.approved_at is null
   )
@@ -581,7 +616,14 @@ create policy "authorized can delete scores" on scores for delete to authenticat
     join trip_memberships on trip_memberships.trip_id = rounds.trip_id
     where round_entries.id = scores.round_entry_id
       and trip_memberships.user_id = (select auth.uid())
-      and trip_memberships.player_id = round_entries.scorer_player_id
+      and (
+        trip_memberships.player_id = round_entries.scorer_player_id
+        or exists (
+          select 1 from round_entry_players rep
+          where rep.round_entry_id = round_entries.id
+            and rep.player_id = trip_memberships.player_id
+        )
+      )
       and rounds.locked = false
       and round_entries.approved_at is null
   )
