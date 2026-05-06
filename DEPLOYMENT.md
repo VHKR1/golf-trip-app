@@ -19,10 +19,10 @@ The included `vercel.json` adds basic security headers and cache rules for the s
 
 This branch is wired to Supabase for:
 
-- Email magic-link sign-in
+- Owner/admin email and password sign-in
 - First-owner trip bootstrap
-- Invite-code joining
-- Player profile claiming
+- Trip-code player access
+- Player profile selection
 - Admin setup/scoring/review
 - Assigned player scorecard updates
 - Leaderboards computed from database source data
@@ -31,7 +31,7 @@ This branch is wired to Supabase for:
 
 1. Create a Supabase project.
 2. Run `supabase-schema.sql` in the SQL editor, or apply the migrations already applied through the Supabase MCP.
-3. Enable email magic-link auth.
+3. Enable email/password auth.
 4. Add your deployed domain to Supabase Auth redirect URLs.
 5. Confirm the public values in `app.js` or expose them before the app script as:
 

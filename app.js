@@ -684,7 +684,11 @@ function playerName(playerId) {
 }
 
 function entryPlayerIds(entry) {
-  return db.roundEntryPlayers.filter((item) => item.roundEntryId === entry.id).map((item) => item.playerId);
+  return entryPlayerIdsIn(db, entry);
+}
+
+function entryPlayerIdsIn(source, entry) {
+  return source.roundEntryPlayers.filter((item) => item.roundEntryId === entry.id).map((item) => item.playerId);
 }
 
 function playerCanEditEntry(round, entry, playerId = currentMembership().playerId) {
@@ -765,6 +769,13 @@ function tripPlayers(tripId = currentTrip().id) {
   return db.players.filter((player) => player.tripId === tripId && player.active);
 }
 
+function awardSelectablePlayers(round, selectedPlayerId) {
+  const players = tripPlayers(round.tripId);
+  if (!selectedPlayerId || players.some((player) => player.id === selectedPlayerId)) return players;
+  const historicalWinner = db.players.find((player) => player.id === selectedPlayerId && player.tripId === round.tripId);
+  return historicalWinner ? [...players, historicalWinner] : players;
+}
+
 function leaderboardPlayers(tripId = currentTrip().id) {
   const completedRoundIds = tripRounds(tripId).filter((round) => round.status === ROUND_STATES.COMPLETE).map((round) => round.id);
   const completedEntryIds = db.roundEntries.filter((entry) => completedRoundIds.includes(entry.roundId)).map((entry) => entry.id);
@@ -784,7 +795,11 @@ function tripCourses(tripId = currentTrip().id) {
 }
 
 function courseFor(round) {
-  return db.courses.find((course) => course.id === round.courseId) || db.courses[0];
+  return courseForIn(db, round);
+}
+
+function courseForIn(source, round) {
+  return source.courses.find((course) => course.id === round.courseId) || source.courses[0];
 }
 
 function entriesFor(round) {
@@ -792,7 +807,11 @@ function entriesFor(round) {
 }
 
 function playersForEntry(entry) {
-  return entryPlayerIds(entry).map((id) => db.players.find((player) => player.id === id)).filter(Boolean);
+  return playersForEntryIn(db, entry);
+}
+
+function playersForEntryIn(source, entry) {
+  return entryPlayerIdsIn(source, entry).map((id) => source.players.find((player) => player.id === id)).filter(Boolean);
 }
 
 function entryLabel(entry) {
@@ -801,55 +820,95 @@ function entryLabel(entry) {
 }
 
 function scoreFor(entryId, holeNumber) {
-  return db.scores.find((score) => score.roundEntryId === entryId && score.holeNumber === holeNumber)?.strokes ?? "";
+  return scoreForIn(db, entryId, holeNumber);
+}
+
+function scoreForIn(source, entryId, holeNumber) {
+  return source.scores.find((score) => score.roundEntryId === entryId && score.holeNumber === holeNumber)?.strokes ?? "";
 }
 
 function entryScoreCount(round, entry) {
-  return courseFor(round).holes.filter((hole) => playersForEntry(entry).length && scoreFor(entry.id, hole.holeNumber) !== "").length;
+  return entryScoreCountIn(db, round, entry);
+}
+
+function entryScoreCountIn(source, round, entry) {
+  return courseForIn(source, round).holes.filter((hole) => playersForEntryIn(source, entry).length && scoreForIn(source, entry.id, hole.holeNumber) !== "").length;
 }
 
 function isEntryComplete(round, entry) {
-  return playersForEntry(entry).length > 0 && entryScoreCount(round, entry) === courseFor(round).holes.length;
+  return isEntryCompleteIn(db, round, entry);
+}
+
+function isEntryCompleteIn(source, round, entry) {
+  return playersForEntryIn(source, entry).length > 0 && entryScoreCountIn(source, round, entry) === courseForIn(source, round).holes.length;
 }
 
 function scoreCount(round) {
-  return entriesFor(round).reduce((sum, entry) => sum + entryScoreCount(round, entry), 0);
+  return scoreCountIn(db, round);
+}
+
+function scoreCountIn(source, round) {
+  return roundEntriesFor(source, round).reduce((sum, entry) => sum + entryScoreCountIn(source, round, entry), 0);
 }
 
 function expectedScoreCount(round) {
-  return entriesFor(round).length * courseFor(round).holes.length;
+  return expectedScoreCountIn(db, round);
+}
+
+function expectedScoreCountIn(source, round) {
+  return roundEntriesFor(source, round).length * courseForIn(source, round).holes.length;
 }
 
 function isMatchPairingValid(round) {
+  return isMatchPairingValidIn(db, round);
+}
+
+function isMatchPairingValidIn(source, round) {
   if (round.gameMode !== "MATCH_PLAY") return true;
-  const entries = entriesFor(round);
-  return entries.length >= 2 && entries.length % 2 === 0 && entries.every((entry) => playersForEntry(entry).length === 1);
+  const entries = roundEntriesFor(source, round);
+  return entries.length >= 2 && entries.length % 2 === 0 && entries.every((entry) => playersForEntryIn(source, entry).length === 1);
 }
 
 function entriesReadyForCompletion(round) {
-  return entriesFor(round).every((entry) => {
-    if (!isEntryComplete(round, entry)) return false;
+  return entriesReadyForCompletionIn(db, round);
+}
+
+function entriesReadyForCompletionIn(source, round) {
+  return roundEntriesFor(source, round).every((entry) => {
+    if (!isEntryCompleteIn(source, round, entry)) return false;
     return !entry.scorerPlayerId || Boolean(entry.approvedAt);
   });
 }
 
 function isRoundComplete(round) {
-  return entriesFor(round).length >= 2
-    && isMatchPairingValid(round)
-    && scoreCount(round) === expectedScoreCount(round)
-    && entriesReadyForCompletion(round)
-    && Boolean(awardPlayer(round.id, "LONGEST_DRIVE"))
-    && Boolean(awardPlayer(round.id, "NEAREST_PIN"));
+  return isRoundCompleteIn(db, round);
+}
+
+function isRoundCompleteIn(source, round) {
+  return roundEntriesFor(source, round).length >= 2
+    && isMatchPairingValidIn(source, round)
+    && scoreCountIn(source, round) === expectedScoreCountIn(source, round)
+    && entriesReadyForCompletionIn(source, round)
+    && Boolean(awardPlayerIn(source, round.id, "LONGEST_DRIVE"))
+    && Boolean(awardPlayerIn(source, round.id, "NEAREST_PIN"));
 }
 
 function derivedStatus(round) {
-  if (round.status === ROUND_STATES.COMPLETE && isRoundComplete(round)) return ROUND_STATES.COMPLETE;
-  if (scoreCount(round) > 0 || awardPlayer(round.id, "LONGEST_DRIVE") || awardPlayer(round.id, "NEAREST_PIN")) return ROUND_STATES.IN_PROGRESS;
+  return derivedStatusIn(db, round);
+}
+
+function derivedStatusIn(source, round) {
+  if (round.status === ROUND_STATES.COMPLETE && isRoundCompleteIn(source, round)) return ROUND_STATES.COMPLETE;
+  if (scoreCountIn(source, round) > 0 || awardPlayerIn(source, round.id, "LONGEST_DRIVE") || awardPlayerIn(source, round.id, "NEAREST_PIN")) return ROUND_STATES.IN_PROGRESS;
   return ROUND_STATES.NOT_STARTED;
 }
 
 function awardPlayer(roundId, type) {
-  return db.awards.find((award) => award.roundId === roundId && award.type === type)?.playerId || "";
+  return awardPlayerIn(db, roundId, type);
+}
+
+function awardPlayerIn(source, roundId, type) {
+  return source.awards.find((award) => award.roundId === roundId && award.type === type)?.playerId || "";
 }
 
 function stablefordPoints(strokes, par) {
@@ -1336,11 +1395,12 @@ function renderEntrySetup(round, entry) {
 
 function renderAwardSelect(round, type, label) {
   const value = awardPlayer(round.id, type);
+  const players = awardSelectablePlayers(round, value);
   return h`
     <label class="field"><span>${escapeHtml(label)}</span>
       <select data-award="${round.id}|${type}" ${round.locked ? "disabled" : ""}>
         <option value="">Select player</option>
-        ${tripPlayers().map((player) => `<option value="${player.id}" ${player.id === value ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}
+        ${players.map((player) => `<option value="${player.id}" ${player.id === value ? "selected" : ""}>${escapeHtml(player.name)}${player.active === false ? " · archived" : ""}</option>`).join("")}
       </select>
     </label>
   `;
@@ -1925,7 +1985,7 @@ function changeScore(payload) {
     const existing = next.scores.find((score) => score.roundEntryId === entryId && score.holeNumber === holeNumber);
     if (existing) existing.strokes = Math.max(1, Math.min(12, existing.strokes + delta));
     else next.scores.push({ id: uid("score"), roundEntryId: entryId, holeNumber, strokes: Math.max(1, Math.min(12, par + (delta > 0 ? 0 : -1))), updatedAt: nowIso() });
-    round.status = derivedStatus(round);
+    round.status = derivedStatusIn(next, round);
     round.updatedAt = nowIso();
   });
 }
@@ -1937,7 +1997,7 @@ function setAward(payload, playerId) {
     if (!round || round.locked) return;
     next.awards = next.awards.filter((award) => !(award.roundId === roundId && award.type === type));
     if (playerId) next.awards.push({ id: uid("award"), roundId, type, playerId });
-    round.status = derivedStatus(round);
+    round.status = derivedStatusIn(next, round);
   });
 }
 
