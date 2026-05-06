@@ -76,7 +76,6 @@ function createDemoDatabase() {
       tripId,
       name: ["Victor", "Alex", "Sam", "Jamie", "Chris", "Taylor"][index],
       handicap: [13, 8, 18, 11, 21, 15][index],
-      pin: ["1342", "2819", "4428", "7610", "9051", "3374"][index],
       active: true,
     })),
     courses: [
@@ -126,7 +125,6 @@ function normalizeDatabase(input) {
       tripId: player.tripId || tripId,
       name: player.name || "Player",
       handicap: player.handicap ?? "",
-      pin: normalizePlayerPin(player.pin || player.playerPin || ""),
       active: player.active !== false,
     })),
     courses: (Array.isArray(db.courses) && (allowEmpty || db.courses.length) ? db.courses : demo.courses).map((course) => ({
@@ -212,7 +210,7 @@ function snakeMembership(row) {
 }
 
 function snakePlayer(row) {
-  return { id: row.id, tripId: row.trip_id, name: row.name, handicap: row.handicap ?? "", pin: row.player_pin || "", active: row.active !== false };
+  return { id: row.id, tripId: row.trip_id, name: row.name, handicap: row.handicap ?? "", active: row.active !== false };
 }
 
 function snakeRound(row) {
@@ -307,10 +305,16 @@ class SupabaseDatabaseAdapter {
     return data.user || null;
   }
 
-  async sendMagicLink(email) {
+  async signInWithPassword(email, password) {
+    const { error } = await this.client.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+  }
+
+  async createPasswordAccount(email, password) {
     const redirectTo = window.location.origin + window.location.pathname;
-    const { error } = await this.client.auth.signInWithOtp({
+    const { error } = await this.client.auth.signUp({
       email,
+      password,
       options: { emailRedirectTo: redirectTo },
     });
     if (error) throw error;
@@ -451,7 +455,7 @@ class SupabaseDatabaseAdapter {
 
     await this.upsertRows("trips", [{ id: trip.id, name: trip.name, invite_code: trip.inviteCode, created_by: trip.createdBy || user.id, created_at: trip.createdAt || nowIso() }]);
     await this.upsertRows("trip_memberships", nextDb.memberships.filter((item) => item.tripId === trip.id).map((item) => ({ id: item.id, trip_id: item.tripId, user_id: item.userId, role: item.role, player_id: item.playerId || null })));
-    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, player_pin: normalizePlayerPin(player.pin), active: player.active !== false })));
+    await this.upsertRows("players", nextDb.players.filter((player) => player.tripId === trip.id).map((player) => ({ id: player.id, trip_id: player.tripId, name: player.name, handicap: player.handicap === "" ? null : player.handicap, active: player.active !== false })));
     await this.upsertRows("courses", nextDb.courses.filter((course) => course.tripId === trip.id).map((course) => ({ id: course.id, trip_id: course.tripId, name: course.name })));
     await this.upsertRows("course_holes", nextDb.courses.filter((course) => course.tripId === trip.id).flatMap((course) => course.holes.map((hole) => ({ course_id: course.id, hole_number: hole.holeNumber, par: hole.par }))), "course_id,hole_number");
     const roundIds = nextDb.rounds.filter((round) => round.tripId === trip.id).map((round) => round.id);
@@ -465,8 +469,9 @@ class SupabaseDatabaseAdapter {
 
   async savePlayerRemote(nextDb, membership) {
     if (!membership?.playerId) return;
+    const entryIdsForPlayer = nextDb.roundEntryPlayers.filter((item) => item.playerId === membership.playerId).map((item) => item.roundEntryId);
     const editableEntryIds = nextDb.roundEntries
-      .filter((entry) => entry.scorerPlayerId === membership.playerId && !entry.approvedAt)
+      .filter((entry) => (entry.scorerPlayerId === membership.playerId || entryIdsForPlayer.includes(entry.id)) && !entry.approvedAt)
       .map((entry) => entry.id);
     if (!editableEntryIds.length) return;
     await this.upsertRows("round_entries", nextDb.roundEntries.filter((entry) => editableEntryIds.includes(entry.id)).map((entry) => ({
@@ -520,17 +525,9 @@ class SupabaseDatabaseAdapter {
     if (error) throw error;
   }
 
-  async loadGuest(inviteCode, playerId = "", playerPin = "") {
+  async loadGuest(inviteCode, playerId = "") {
     const { data, error } = await this.client.rpc("trip_snapshot_by_invite", { invite_code_input: inviteCode });
     if (error) throw error;
-    if (playerId) {
-      const { error: claimError } = await this.client.rpc("verify_guest_player_pin", {
-        invite_code_input: inviteCode,
-        player_id_input: playerId,
-        player_pin_input: normalizePlayerPin(playerPin),
-      });
-      if (claimError) throw claimError;
-    }
     return databaseFromSnapshot(data, {
       userId: playerId ? `guest_${playerId}` : "guest",
       user: { id: playerId ? `guest_${playerId}` : "guest", name: playerId ? "Guest player" : "Guest", email: "" },
@@ -552,7 +549,6 @@ class SupabaseDatabaseAdapter {
       const { data, error } = await this.client.rpc("save_guest_scorecard", {
         invite_code_input: guest.inviteCode,
         player_id_input: guest.playerId,
-        player_pin_input: normalizePlayerPin(guest.playerPin),
         entry_id_input: entryId,
         score_rows: scoreRows,
         submit_input: Boolean(entry?.submittedAt),
@@ -579,7 +575,6 @@ let pendingDeleteRoundId = "";
 let pendingDeletePlayerId = "";
 let authUser = null;
 let booting = SUPABASE_ENABLED;
-let authEmailSent = "";
 let showAdminSignin = false;
 let guestSession = (() => {
   try {
@@ -637,7 +632,7 @@ function entryPlayerIds(entry) {
 function playerCanEditEntry(round, entry, playerId = currentMembership().playerId) {
   if (!playerId || round.locked || entry.approvedAt) return false;
   const ids = entryPlayerIds(entry);
-  if (round.gameMode === "SCRAMBLE") return entry.scorerPlayerId === playerId;
+  if (round.gameMode === "SCRAMBLE") return ids.includes(playerId) || entry.scorerPlayerId === playerId;
   return ids.includes(playerId) || entry.scorerPlayerId === playerId;
 }
 
@@ -691,14 +686,6 @@ function normalizeHandicapInput(value) {
   const handicap = Number(raw.replace(",", "."));
   if (!Number.isFinite(handicap)) return "";
   return Math.max(-10, Math.min(54, Math.round(handicap * 10) / 10));
-}
-
-function normalizePlayerPin(value) {
-  return String(value ?? "").replace(/\D/g, "").slice(0, 6);
-}
-
-function generatePlayerPin() {
-  return String(Math.floor(1000 + Math.random() * 9000));
 }
 
 function courseHasSourceData(courseId) {
@@ -990,14 +977,15 @@ function renderAuthScreen() {
       </section>
       <section class="card auth-card secondary-auth">
         <p class="eyebrow">Owner only</p>
-        ${showAdminSignin || authEmailSent
+        ${showAdminSignin
           ? h`
             <h2>Admin sign in</h2>
-            <p>Use this only for the trip owner or admins.</p>
-            ${authEmailSent ? `<section class="notice">Magic link sent to ${escapeHtml(authEmailSent)}. Open it on this device to continue.</section>` : ""}
-            <form class="join-form" data-magic-link>
+            <p>Use your admin email and password. Players should use the trip code above.</p>
+            <form class="join-form" data-password-auth>
               <input name="email" type="email" placeholder="you@example.com" autocomplete="email" required />
-              <button class="primary">Send magic link</button>
+              <input name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+              <button class="primary" name="action" value="sign-in">Sign in</button>
+              <button class="secondary" name="action" value="sign-up">Create admin account</button>
             </form>
             <button class="quiet-button" data-hide-admin-signin>Back to player access</button>
           `
@@ -1010,10 +998,10 @@ function renderAuthScreen() {
 }
 
 function bindAuthEvents(app) {
-  app.querySelectorAll("[data-magic-link]").forEach((form) => form.addEventListener("submit", sendMagicLink));
+  app.querySelectorAll("[data-password-auth]").forEach((form) => form.addEventListener("submit", passwordAuth));
   app.querySelectorAll("[data-guest-access]").forEach((form) => form.addEventListener("submit", guestAccess));
   app.querySelectorAll("[data-show-admin-signin]").forEach((button) => button.addEventListener("click", () => { showAdminSignin = true; render(); }));
-  app.querySelectorAll("[data-hide-admin-signin]").forEach((button) => button.addEventListener("click", () => { showAdminSignin = false; authEmailSent = ""; render(); }));
+  app.querySelectorAll("[data-hide-admin-signin]").forEach((button) => button.addEventListener("click", () => { showAdminSignin = false; render(); }));
 }
 
 function renderOwnerSetup() {
@@ -1124,10 +1112,6 @@ function renderPlayersAdmin() {
               <span>HCP</span>
               <input data-player-hcp="${player.id}" value="${escapeHtml(player.handicap)}" inputmode="decimal" aria-label="Handicap for ${escapeHtml(player.name)}" placeholder="-" />
             </label>
-            <label class="pin-control">
-              <span>PIN</span>
-              <input data-player-pin="${player.id}" value="${escapeHtml(player.pin)}" inputmode="numeric" aria-label="Access PIN for ${escapeHtml(player.name)}" placeholder="1234" />
-            </label>
             ${linkedPlayerId === player.id
               ? `<span class="me-badge">Me</span>`
               : linkedPlayerId
@@ -1151,7 +1135,7 @@ function renderAccessAdmin() {
       <div class="list-row access-row">
         <div>
           <strong>${escapeHtml(player.name)}</strong>
-          <span>${user ? escapeHtml(user.email) : "Not claimed"}</span>
+          <span>${user ? escapeHtml(user.email) : "Available with trip code"}</span>
         </div>
         ${membership
           ? `<label class="role-control"><span>Role</span><select data-member-role="${membership.id}" ${canChangeRole ? "" : "disabled"}>
@@ -1159,7 +1143,7 @@ function renderAccessAdmin() {
               <option value="${ROLES.ADMIN}" ${membership.role === ROLES.ADMIN ? "selected" : ""}>Admin</option>
               ${membership.role === ROLES.OWNER ? `<option value="${ROLES.OWNER}" selected>Owner</option>` : ""}
             </select></label>`
-          : `<span>Invite pending</span>`}
+          : `<span>Code access</span>`}
       </div>
     `;
   }).join("");
@@ -1172,7 +1156,7 @@ function renderAccessAdmin() {
       </form>
       <div class="invite-box">
         <strong>${escapeHtml(trip.inviteCode)}</strong>
-        <span>Players use this code to claim their profile and scorecards.</span>
+        <span>Players use this code to select their profile and scorecards.</span>
       </div>
       <div class="list">${rows}</div>
     </section>
@@ -1370,17 +1354,17 @@ function renderPlayerPortal() {
 }
 
 function renderClaimProfile() {
-  const claimedIds = new Set(db.memberships.filter((membership) => membership.tripId === currentTrip().id && membership.playerId).map((membership) => membership.playerId));
+  const claimedIds = guestSession ? new Set() : new Set(db.memberships.filter((membership) => membership.tripId === currentTrip().id && membership.playerId).map((membership) => membership.playerId));
+  const title = guestSession ? "Select your player profile" : "Claim your player profile";
   return h`
     <section class="card claim-card">
-      <div class="section-header"><h2>Claim your player profile</h2><span>${escapeHtml(currentTrip().name)}</span></div>
+      <div class="section-header"><h2>${title}</h2><span>${escapeHtml(currentTrip().name)}</span></div>
       <form class="join-form" data-claim-player>
         <select name="playerId" required>
           <option value="">Choose your name</option>
           ${tripPlayers().map((player) => `<option value="${player.id}" ${claimedIds.has(player.id) ? "disabled" : ""}>${escapeHtml(player.name)}${claimedIds.has(player.id) ? " · claimed" : ""}</option>`).join("")}
         </select>
-        ${guestSession ? `<input name="playerPin" placeholder="Player PIN" inputmode="numeric" autocomplete="one-time-code" required />` : ""}
-        <button>Claim profile</button>
+        <button>${guestSession ? "Continue" : "Claim profile"}</button>
       </form>
     </section>
   `;
@@ -1446,7 +1430,6 @@ function bindEvents(app) {
   app.querySelectorAll("[data-select-player]").forEach((button) => button.addEventListener("click", () => { selectedPlayerId = button.dataset.selectPlayer; render(); }));
   app.querySelectorAll("[data-add-player]").forEach((form) => form.addEventListener("submit", addPlayer));
   app.querySelectorAll("[data-player-hcp]").forEach((input) => input.addEventListener("change", () => updatePlayerHandicap(input.dataset.playerHcp, input.value)));
-  app.querySelectorAll("[data-player-pin]").forEach((input) => input.addEventListener("change", () => updatePlayerPin(input.dataset.playerPin, input.value)));
   app.querySelectorAll("[data-link-me]").forEach((button) => button.addEventListener("click", () => linkCurrentUserToPlayer(button.dataset.linkMe)));
   app.querySelectorAll("[data-remove-player]").forEach((button) => button.addEventListener("click", () => removePlayer(button.dataset.removePlayer)));
   app.querySelectorAll("[data-add-round]").forEach((form) => form.addEventListener("submit", addRound));
@@ -1470,18 +1453,25 @@ function bindEvents(app) {
   app.querySelectorAll("[data-claim-player]").forEach((form) => form.addEventListener("submit", claimPlayer));
 }
 
-async function sendMagicLink(event) {
+async function passwordAuth(event) {
   event.preventDefault();
   const form = event.currentTarget;
-  const email = String(new FormData(form).get("email") || "").trim().toLowerCase();
-  if (!email) return;
+  const data = new FormData(form);
+  const email = String(data.get("email") || "").trim().toLowerCase();
+  const password = String(data.get("password") || "");
+  const action = event.submitter?.value || "sign-in";
+  if (!email || !password) return;
   try {
-    await adapter.sendMagicLink(email);
-    authEmailSent = email;
-    notice = "";
+    if (action === "sign-up") {
+      await adapter.createPasswordAccount(email, password);
+      notice = "Admin account created. Check your email if Supabase asks for confirmation, then sign in.";
+    } else {
+      await adapter.signInWithPassword(email, password);
+      notice = "Signed in.";
+    }
   } catch (error) {
-    console.warn("Magic link failed.", error);
-    notice = error.message || "Could not send the magic link.";
+    console.warn("Password auth failed.", error);
+    notice = error.message || "Could not sign in.";
   }
   render();
 }
@@ -1593,10 +1583,9 @@ function claimPlayer(event) {
   const form = event.currentTarget;
   const formData = new FormData(form);
   const playerId = String(formData.get("playerId") || "");
-  const playerPin = normalizePlayerPin(formData.get("playerPin"));
   if (!playerId) return;
   if (SUPABASE_ENABLED && guestSession) {
-    claimGuestPlayer(playerId, playerPin);
+    claimGuestPlayer(playerId);
     return;
   }
   if (SUPABASE_ENABLED) {
@@ -1616,11 +1605,10 @@ function claimPlayer(event) {
   }, "Claimed player profile");
 }
 
-async function claimGuestPlayer(playerId, playerPin) {
+async function claimGuestPlayer(playerId) {
   try {
-    if (playerPin.length < 4) throw new Error("Enter the player PIN from the trip admin.");
-    const nextGuestSession = { ...guestSession, playerId, playerPin };
-    db = await adapter.loadGuest(nextGuestSession.inviteCode, playerId, playerPin);
+    const nextGuestSession = { ...guestSession, playerId };
+    db = await adapter.loadGuest(nextGuestSession.inviteCode, playerId);
     guestSession = nextGuestSession;
     localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
     db.session.view = "player";
@@ -1687,7 +1675,7 @@ function addPlayer(event) {
   const name = String(data.get("name") || "").trim();
   if (!name) return;
   mutate((next) => {
-    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: normalizeHandicapInput(data.get("handicap")), pin: generatePlayerPin(), active: true });
+    next.players.push({ id: uid("player"), tripId: next.session.tripId, name, handicap: normalizeHandicapInput(data.get("handicap")), active: true });
   }, `Added player ${name}`);
 }
 
@@ -1699,21 +1687,6 @@ function updatePlayerHandicap(playerId, value) {
     player.handicap = handicap;
     notice = `${player.name}'s handicap updated.`;
   }, "Updated player handicap");
-}
-
-function updatePlayerPin(playerId, value) {
-  const pin = normalizePlayerPin(value);
-  if (pin.length < 4) {
-    notice = "Player PIN must be 4 to 6 numbers.";
-    render();
-    return;
-  }
-  mutate((next) => {
-    const player = next.players.find((item) => item.id === playerId && item.tripId === next.session.tripId);
-    if (!player || !canAdmin()) return;
-    player.pin = pin;
-    notice = `${player.name}'s player PIN updated.`;
-  }, "Updated player PIN");
 }
 
 function linkCurrentUserToPlayer(playerId) {
@@ -2022,11 +1995,7 @@ async function initializeApp() {
   try {
     authUser = await adapter.authUser();
     if (!authUser && guestSession?.inviteCode) {
-      if (guestSession.playerId && !guestSession.playerPin) {
-        guestSession = { inviteCode: guestSession.inviteCode, playerId: "" };
-        localStorage.setItem(GUEST_ACCESS_KEY, JSON.stringify(guestSession));
-      }
-      db = await adapter.loadGuest(guestSession.inviteCode, guestSession.playerId || "", guestSession.playerPin || "");
+      db = await adapter.loadGuest(guestSession.inviteCode, guestSession.playerId || "");
       scoringRoundId = db.session.activeRoundId || tripRounds()[0]?.id || "";
     } else if (authUser) {
       db = await adapter.loadRemote();
