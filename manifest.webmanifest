@@ -1,6 +1,6 @@
 {
-  "name": "Golf Trip Pro",
-  "short_name": "Golf Pro",
+  "name": "Golf Trip App",
+  "short_name": "Golf Trip",
   "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#F7F5EF",

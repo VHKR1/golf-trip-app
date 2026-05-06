@@ -981,7 +981,7 @@ function h(strings, ...values) {
 function render() {
   const app = document.querySelector("#app");
   if (booting) {
-    app.innerHTML = `<main class="main auth-shell"><section class="card auth-card"><h1>Golf Trip Pro</h1><p>Loading your trip...</p></section></main>`;
+    app.innerHTML = `<main class="main auth-shell"><section class="card auth-card"><h1>Golf Trip App</h1><p>Loading your trip...</p></section></main>`;
     return;
   }
   if (SUPABASE_ENABLED && !authUser && !guestSession) {
@@ -999,7 +999,7 @@ function render() {
     <header class="topbar">
       <div class="brand">
         <div>
-          <h1>Golf Trip Pro</h1>
+          <h1>Golf Trip App</h1>
           <p>${escapeHtml(trip.name)} · ${escapeHtml(currentMembership().role)}</p>
         </div>
         ${SUPABASE_ENABLED && authUser
@@ -1016,7 +1016,7 @@ function render() {
     </header>
     <main class="main">
       ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
-      ${renderDeploymentModeNotice()}
+      ${renderLocalModeNotice()}
       ${renderAccountAccess()}
       ${renderView()}
     </main>
@@ -1033,7 +1033,7 @@ function renderAuthScreen() {
   return h`
     <main class="main auth-shell">
       <section class="card auth-card">
-        <p class="eyebrow">Golf Trip Pro</p>
+        <p class="eyebrow">Golf Trip App</p>
         <h1>Player access</h1>
         <p>Enter the trip code, choose your profile, and score only your assigned cards.</p>
         ${notice ? `<section class="notice">${escapeHtml(notice)}</section>` : ""}
@@ -1043,7 +1043,7 @@ function renderAuthScreen() {
         </form>
       </section>
       <section class="card auth-card secondary-auth">
-        <p class="eyebrow">Owner only</p>
+        <p class="eyebrow">Trip owner</p>
         ${showAdminSignin
           ? h`
             <h2>Admin sign in</h2>
@@ -1108,15 +1108,8 @@ function renderAccountAccess() {
   `;
 }
 
-function renderDeploymentModeNotice() {
-  if (SUPABASE_ENABLED) {
-    return h`
-      <section class="deploy-notice live">
-        <strong>${guestSession ? "Player access" : "Supabase connected"}</strong>
-        <span>${guestSession ? `Using trip code ${escapeHtml(guestSession.inviteCode)}` : `Signed in as ${escapeHtml(authUser?.email || currentUser().email || "owner")}.`}</span>
-      </section>
-    `;
-  }
+function renderLocalModeNotice() {
+  if (SUPABASE_ENABLED) return "";
   return h`
     <section class="deploy-notice">
       <strong>Local demo storage</strong>
@@ -1143,7 +1136,7 @@ function renderAdmin() {
   ];
   return h`
     <section class="hero-panel">
-      <p class="eyebrow">Admin cockpit</p>
+      <p class="eyebrow">Trip admin</p>
       <h2>${escapeHtml(currentTrip().name)}</h2>
       <p>Invite code ${escapeHtml(currentTrip().inviteCode)} · ${tripPlayers().length} players · ${rounds.length} rounds</p>
     </section>
@@ -1165,7 +1158,7 @@ function renderPlayersAdmin() {
       <div class="section-header"><h2>Players</h2><span>${players.length} active</span></div>
       <form class="inline-form" data-add-player>
         <input name="name" placeholder="Player name" required />
-        <input name="handicap" placeholder="HCP" inputmode="numeric" />
+        <input name="handicap" placeholder="Handicap" inputmode="numeric" />
         <button>Add</button>
       </form>
       <div class="list">
@@ -1173,10 +1166,10 @@ function renderPlayersAdmin() {
           <div class="list-row player-row">
             <div>
               <strong>${escapeHtml(player.name)}</strong>
-              <span>Player profile</span>
+              <span>${player.active ? "Active player" : "Archived"}</span>
             </div>
             <label class="hcp-control">
-              <span>HCP</span>
+              <span>Handicap</span>
               <input data-player-hcp="${player.id}" value="${escapeHtml(player.handicap)}" inputmode="decimal" aria-label="Handicap for ${escapeHtml(player.name)}" placeholder="-" />
             </label>
             ${linkedPlayerId === player.id
@@ -1210,13 +1203,13 @@ function renderAccessAdmin() {
               <option value="${ROLES.ADMIN}" ${membership.role === ROLES.ADMIN ? "selected" : ""}>Admin</option>
               ${membership.role === ROLES.OWNER ? `<option value="${ROLES.OWNER}" selected>Owner</option>` : ""}
             </select></label>`
-          : `<span>Code access</span>`}
+          : `<span>Trip code</span>`}
       </div>
     `;
   }).join("");
   return h`
     <section class="card">
-      <div class="section-header"><h2>Invites</h2><span>Code ${escapeHtml(trip.inviteCode)}</span></div>
+      <div class="section-header"><h2>Access code</h2><span>${escapeHtml(trip.inviteCode)}</span></div>
       <form class="inline-form access-code-form" data-update-invite-code>
         <input name="inviteCode" value="${escapeHtml(trip.inviteCode)}" aria-label="Invite code" required />
         <button>Update code</button>
@@ -1264,7 +1257,7 @@ function renderCoursesAdmin() {
 function renderRoundsAdmin() {
   return h`
     <section class="card">
-      <div class="section-header"><h2>Rounds</h2><span>Database records</span></div>
+      <div class="section-header"><h2>Rounds</h2><span>Schedule and scoring</span></div>
       <form class="inline-form" data-add-round>
         <input name="name" placeholder="Round name" required />
         <select name="courseId">${tripCourses().map((course) => `<option value="${course.id}">${escapeHtml(course.name)}</option>`).join("")}</select>
@@ -1278,7 +1271,7 @@ function renderRoundsAdmin() {
             <div class="round-admin-row ${round.id === scoringRoundId ? "selected" : ""}">
               <button class="round-row" data-scoring-round="${round.id}">
                 <span><strong>${escapeHtml(round.name)}</strong><small>${GAME_MODES[round.gameMode].label} · ${scoreCount(round)} / ${expectedScoreCount(round)} scores</small></span>
-                <em>${status.replace("_", " ")}</em>
+                <em>${status.replaceAll("_", " ")}</em>
               </button>
               <button class="danger-btn ${pendingDeleteRoundId === round.id ? "confirming" : ""}" data-remove-round="${round.id}" ${round.locked ? "disabled" : ""}>${roundDeleteLabel(round)}</button>
             </div>
@@ -1330,13 +1323,13 @@ function renderEntrySetup(round, entry) {
       ${round.gameMode === "SCRAMBLE"
         ? `<div class="chip-list">${players.map((player) => `<button class="chip ${selected.includes(player.id) ? "selected" : ""}" data-toggle-entry-player="${round.id}|${entry.id}|${player.id}" ${setupLocked ? "disabled" : ""}>${escapeHtml(player.name)}</button>`).join("")}</div>`
         : `<div class="slot-row"><select data-set-entry-player="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}><option value="">Select player</option>${players.map((player) => `<option value="${player.id}" ${selected.includes(player.id) ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}</select><button data-remove-entry="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}>Remove</button></div>`}
-      <label class="field"><span>Scorecard owner</span>
+      <label class="field"><span>Who can submit</span>
         <select data-set-scorer="${round.id}|${entry.id}" ${setupLocked ? "disabled" : ""}>
-          <option value="">Admin only</option>
+          <option value="">Admin enters score</option>
           ${players.filter((player) => selected.includes(player.id)).map((player) => `<option value="${player.id}" ${entry.scorerPlayerId === player.id ? "selected" : ""}>${escapeHtml(player.name)}</option>`).join("")}
         </select>
       </label>
-      <span class="review-note">${entryReviewState(entry)}${entry.scorerPlayerId ? ` · scorer ${escapeHtml(playerName(entry.scorerPlayerId))}` : " · admin scoring"}${setupLocked && !round.locked ? " · setup locked after scoring" : ""}</span>
+      <span class="review-note">${entryReviewState(entry)}${entry.scorerPlayerId ? ` · ${escapeHtml(playerName(entry.scorerPlayerId))} can submit` : " · admin enters score"}${setupLocked && !round.locked ? " · setup locked after scoring" : ""}</span>
     </div>
   `;
 }
@@ -1413,7 +1406,7 @@ function renderPlayerPortal() {
       <div class="list">
         ${tripRounds().map((round) => {
           const entry = entriesFor(round).find((item) => playersForEntry(item).some((entryPlayer) => entryPlayer.id === player.id));
-          return `<div class="list-row"><strong>${escapeHtml(round.name)}</strong><span>${entry ? escapeHtml(entryLabel(entry)) : "Not playing"} · ${derivedStatus(round).replace("_", " ")}</span></div>`;
+          return `<div class="list-row"><strong>${escapeHtml(round.name)}</strong><span>${entry ? escapeHtml(entryLabel(entry)) : "Not playing"} · ${derivedStatus(round).replaceAll("_", " ")}</span></div>`;
         }).join("")}
       </div>
     </section>

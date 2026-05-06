@@ -27,7 +27,11 @@ body {
 button, input, select, textarea { font: inherit; }
 button, select, input { min-height: 44px; }
 button { border: 0; cursor: pointer; }
-button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
+button:disabled, select:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(30, 81, 72, 0.28);
+  outline-offset: 2px;
+}
 
 .app-shell { min-height: 100vh; padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
 
@@ -53,6 +57,8 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .brand h1, .brand p { margin: 0; }
 .brand h1 { font-size: 1.12rem; }
 .brand p, .eyebrow, small, .section-header span { color: var(--muted); font-size: 0.78rem; font-weight: 800; }
+.brand > div:first-child { min-width: 0; }
+.brand p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .session-switch { display: grid; gap: 4px; min-width: 132px; color: var(--muted); font-size: 0.72rem; font-weight: 850; }
 .session-switch select, input, select { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); padding: 9px 10px; }
@@ -67,7 +73,7 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 
 .auth-shell {
-  min-height: 100vh;
+  min-height: 100svh;
   align-content: center;
 }
 
@@ -201,20 +207,17 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 .player-row > div:first-child span {
   text-align: left;
 }
-.hcp-control,
-.pin-control {
+.hcp-control {
   display: grid;
   gap: 4px;
-  min-width: 74px;
+  min-width: 96px;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 850;
 }
-.hcp-control span,
-.pin-control span { text-align: left; }
-.hcp-control input,
-.pin-control input {
-  width: 74px;
+.hcp-control span { text-align: left; }
+.hcp-control input {
+  width: 96px;
   min-height: 40px;
   padding: 7px 9px;
   text-align: center;
@@ -307,9 +310,11 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   background: white;
 }
 .scorecard summary {
+  min-height: 54px;
   cursor: pointer;
   list-style: none;
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 13px;
@@ -332,9 +337,9 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 }
 .hole-cell.missing { background: #fff8e7; }
 .hole-cell span { color: var(--muted); font-size: 0.74rem; font-weight: 900; }
-.stepper { display: grid; grid-template-columns: 38px 1fr 38px; align-items: center; gap: 5px; }
+.stepper { display: grid; grid-template-columns: 44px minmax(34px, 1fr) 44px; align-items: center; gap: 5px; }
 .stepper button { border-radius: 8px; background: var(--mint); color: var(--green); font-weight: 950; }
-.stepper strong { display: grid; place-items: center; min-height: 38px; border-radius: 8px; background: white; }
+.stepper strong { display: grid; place-items: center; min-height: 44px; border-radius: 8px; background: white; }
 
 .warning, .notice {
   border-left: 4px solid #f2b84b;
@@ -444,9 +449,11 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
   .session-switch { min-width: 118px; }
   .leaderboard thead { display: none; }
   .leaderboard, .leaderboard tbody, .leaderboard tr, .leaderboard td { display: block; width: 100%; }
-  .leaderboard tr { padding: 12px; border-bottom: 1px solid var(--line); }
+  .leaderboard tr { padding: 12px; border-bottom: 1px solid var(--line); border-radius: 8px; }
   .leaderboard td { padding: 4px 0; }
   .leaderboard td:last-child { text-align: left; font-size: 1.4rem; color: var(--green); }
+  .leaderboard td:nth-child(3) { display: flex; flex-wrap: wrap; gap: 4px; }
+  .leaderboard td span { margin: 0; }
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
@@ -637,6 +644,18 @@ button:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
 @media (max-width: 520px) {
   .admin-tabs {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .player-row,
+  .access-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .player-row .danger-btn,
+  .access-row .role-control {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .round-admin-row {
